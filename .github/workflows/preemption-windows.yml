@@ -9,28 +9,47 @@ permissions:
   contents: read
 
 env:
+  # Keep the same MSYS2 environment used by OpenJDK's build-windows.yml.
   MSYS2_PATH_TYPE: minimal
   CHERE_INVOKING: 1
 
 jobs:
-  windows:
+  build-windows:
+    name: windows-x64
     runs-on: windows-2022
     timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      # The delivery kit needs the release JDK only. The build steps below are
+      # the upstream OpenJDK Windows workflow steps for this exact baseline.
+      matrix:
+        debug-level: [release]
+        include:
+          - debug-level: debug
+            flags: --with-debug-level=fastdebug
+            suffix: -debug
     steps:
-      - name: Force LF Git checkouts
+      # Delivery-only prelude: fetch the tiny branch so the patch can be saved
+      # outside the workspace before the upstream checkout replaces it.
+      - name: 'Force LF Git checkouts'
         shell: cmd
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
 
-      - name: Checkout tiny builder branch
+      - name: 'Checkout tiny builder branch'
         uses: actions/checkout@v6
 
-      - name: Export patch blob without Windows newline conversion
+      - name: 'Export patch blob without Windows newline conversion'
         shell: cmd
         run: git show HEAD:old-preemption.patch > "%RUNNER_TEMP%\old-preemption.patch"
 
-      - name: Checkout OpenJDK baseline on the runner
+      # Upstream build-windows.yml starts here. The checkout is pinned to the
+      # exact OpenJDK baseline that old-preemption.patch was generated from.
+      - name: 'Checkout the JDK source'
         uses: actions/checkout@v6
         with:
           repository: openjdk/jdk25u
@@ -38,49 +57,79 @@ jobs:
           persist-credentials: false
           clean: true
 
-      - name: Apply patch on the runner
+      # The only injected source-modification step.
+      - name: 'Apply Old preemption patch'
         shell: cmd
         run: |
           git apply --check "%RUNNER_TEMP%\old-preemption.patch"
           git apply "%RUNNER_TEMP%\old-preemption.patch"
 
-      - name: Prepare MSYS2
+      - name: 'Get MSYS2'
         uses: ./.github/actions/get-msys2
 
-      - name: Download and verify boot JDK
+      - name: 'Get the BootJDK'
         id: bootjdk
         uses: ./.github/actions/get-bootjdk
         with:
           platform: windows-x64
 
-      - name: Build release JDK and package
-        shell: env /usr/bin/bash --login -eo pipefail {0}
-        env:
-          PATH: ''
-          JDK_BOOT_HOME: ${{ steps.bootjdk.outputs.path }}
-          JOBS: '4'
+      - name: 'Get JTReg'
+        id: jtreg
+        uses: ./.github/actions/get-jtreg
+
+      - name: 'Get GTest'
+        id: gtest
+        uses: ./.github/actions/get-gtest
+
+      - name: 'Check toolchain installed'
+        id: toolchain-check
         run: |
-          mkdir -p build/windows-delivery
-          git rev-parse HEAD > build/windows-delivery/SOURCE-BASE-COMMIT.txt
-          sha256sum "$RUNNER_TEMP/old-preemption.patch" > build/windows-delivery/PATCH-SHA256.txt
-          bash preemption/build-windows.sh 2>&1 | tee build/windows-delivery/build.log
+          set +e
+          '/c/Program Files/Microsoft Visual Studio/2022/Enterprise/vc/auxiliary/build/vcvars64.bat' -vcvars_ver=14.44
+          if [ $? -eq 0 ]; then
+            echo "Toolchain is already installed"
+            echo "toolchain-installed=true" >> $GITHUB_OUTPUT
+          else
+            echo "Toolchain is not yet installed"
+            echo "toolchain-installed=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Upload Windows JDK
-        uses: actions/upload-artifact@v6
-        with:
-          name: windows-x64-jdk-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            build/windows-delivery/*.zip
-            build/windows-delivery/*.sha256
-            build/windows-delivery/SOURCE-BASE-COMMIT.txt
-            build/windows-delivery/PATCH-SHA256.txt
-          if-no-files-found: error
-          compression-level: 0
+      - name: 'Install toolchain and dependencies'
+        run: |
+          '/c/Program Files (x86)/Microsoft Visual Studio/Installer/vs_installer.exe' \
+            modify --quiet --installPath 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise' \
+            --add Microsoft.VisualStudio.Component.VC.14.44.x86.x64
+        if: steps.toolchain-check.outputs.toolchain-installed != 'true'
 
-      - name: Preserve build log
-        if: always()
-        uses: actions/upload-artifact@v6
+      - name: 'Configure'
+        run: >
+          bash configure
+          --with-conf-name=windows-x64
+          ${{ matrix.flags }}
+          --with-version-opt=${GITHUB_ACTOR}-${GITHUB_SHA}
+          --with-boot-jdk=${{ steps.bootjdk.outputs.path }}
+          --with-jtreg=${{ steps.jtreg.outputs.path }}
+          --with-gtest=${{ steps.gtest.outputs.path }}
+          --with-msvc-toolset-version=14.44
+          --with-jmod-compress=zip-1 || (
+          echo "Dumping config.log:" &&
+          cat config.log &&
+          exit 1)
+        env:
+          # OpenJDK's Windows workflow intentionally supplies only GITHUB_PATH.
+          PATH: ''
+        shell: env /usr/bin/bash --login -eo pipefail {0}
+
+      - name: 'Build'
+        id: build
+        uses: ./.github/actions/do-build
         with:
-          name: windows-build-log-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/windows-delivery/build.log
-          if-no-files-found: ignore
+          make-target: 'product-bundles'
+          platform: windows-x64
+          debug-suffix: '${{ matrix.suffix }}'
+
+      - name: 'Upload bundles'
+        uses: ./.github/actions/upload-bundles
+        with:
+          platform: windows-x64
+          debug-suffix: '${{ matrix.suffix }}'
