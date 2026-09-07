@@ -1719,3 +1719,226 @@ index 000000000..8b9dcac12
 +        System.out.println("PREEMPTION verified pauses=" + counts + " phases=" + phases);
 +    }
 +}
+
+diff --git a/src/hotspot/share/classfile/systemDictionary.cpp b/src/hotspot/share/classfile/systemDictionary.cpp
+index ee526e9..37fc7f7 100644
+--- a/src/hotspot/share/classfile/systemDictionary.cpp
++++ b/src/hotspot/share/classfile/systemDictionary.cpp
+@@ -75,6 +75,7 @@
+ #include "runtime/java.hpp"
+ #include "runtime/javaCalls.hpp"
+ #include "runtime/mutexLocker.hpp"
++#include "runtime/os.hpp"
+ #include "runtime/sharedRuntime.hpp"
+ #include "runtime/signature.hpp"
+ #include "runtime/synchronizer.hpp"
+@@ -1505,26 +1506,49 @@ bool SystemDictionary::do_unloading(GCTimer* gc_timer) {
+   {
+     GCTraceTime(Debug, gc, phases) t("ClassLoaderData", gc_timer);
+     assert_locked_or_safepoint(ClassLoaderDataGraph_lock);  // caller locks.
++
++    double start = os::elapsedTime();
+     // First, mark for unload all ClassLoaderData referencing a dead class loader.
+     unloading_occurred = ClassLoaderDataGraph::do_unloading();
++    log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=CLDG Do Unloading duration=%.3fms",
++                           (os::elapsedTime() - start) * 1000.0);
++
+     if (unloading_occurred) {
+       ConditionalMutexLocker ml2(Module_lock, is_concurrent);
+       JFR_ONLY(Jfr::on_unloading_classes();)
+       MANAGEMENT_ONLY(FinalizerService::purge_unloaded();)
+       ConditionalMutexLocker ml1(SystemDictionary_lock, is_concurrent);
++
++      start = os::elapsedTime();
+       ClassLoaderDataGraph::clean_module_and_package_info();
++      log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Module Package Cleanup duration=%.3fms",
++                             (os::elapsedTime() - start) * 1000.0);
++
++      start = os::elapsedTime();
+       LoaderConstraintTable::purge_loader_constraints();
++      log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Loader Constraints duration=%.3fms",
++                             (os::elapsedTime() - start) * 1000.0);
++
++      start = os::elapsedTime();
+       ResolutionErrorTable::purge_resolution_errors();
++      log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Resolution Errors duration=%.3fms",
++                             (os::elapsedTime() - start) * 1000.0);
+     }
+   }
+ 
+   GCTraceTime(Debug, gc, phases) t("Trigger cleanups", gc_timer);
+ 
+   if (unloading_occurred) {
++    double start = os::elapsedTime();
+     SymbolTable::trigger_cleanup();
++    log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Symbol Cleanup Trigger duration=%.3fms",
++                           (os::elapsedTime() - start) * 1000.0);
+ 
+     ConditionalMutexLocker ml(ClassInitError_lock, is_concurrent);
++    start = os::elapsedTime();
+     InstanceKlass::clean_initialization_error_table();
++    log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Class Init Errors duration=%.3fms",
++                           (os::elapsedTime() - start) * 1000.0);
+   }
+ 
+   return unloading_occurred;
+diff --git a/src/hotspot/share/gc/z/zNMethod.cpp b/src/hotspot/share/gc/z/zNMethod.cpp
+index bf592c2..90f80d0 100644
+--- a/src/hotspot/share/gc/z/zNMethod.cpp
++++ b/src/hotspot/share/gc/z/zNMethod.cpp
+@@ -38,6 +38,7 @@
+ #include "gc/z/zNMethod.hpp"
+ #include "gc/z/zNMethodData.hpp"
+ #include "gc/z/zNMethodTable.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zTask.hpp"
+ #include "gc/z/zUncoloredRoot.inline.hpp"
+ #include "gc/z/zWorkers.hpp"
+@@ -341,6 +342,13 @@ oop ZNMethod::oop_load(const nmethod* const_nm, int index, bool keep_alive) {
+   return to_oop(safe(obj));
+ }
+ 
++class ZNMethodUnlinkPreemptionPoll : public StackObj {
++public:
++  ~ZNMethodUnlinkPreemptionPoll() {
++    ZOldPreemption::poll(true);
++  }
++};
++
+ class ZNMethodUnlinkClosure : public NMethodClosure {
+ private:
+   bool _unloading_occurred;
+@@ -350,6 +358,10 @@ public:
+     : _unloading_occurred(unloading_occurred) {}
+ 
+   virtual void do_nmethod(nmethod* nm) {
++    // Construct before any per-nmethod locks. The guard runs after those
++    // locks have been released, so a Minor never parks this worker while
++    // holding an nmethod or compiled-IC lock.
++    ZNMethodUnlinkPreemptionPoll preemption_poll;
+     if (nm->is_unloading()) {
+       // Unlink from the ZNMethodTable
+       ZNMethod::unregister_nmethod(nm);
+@@ -398,7 +410,7 @@ private:
+ 
+ public:
+   ZNMethodUnlinkTask(bool unloading_occurred)
+-    : ZTask("ZNMethodUnlinkTask"),
++    : ZTask("ZNMethodUnlinkTask", ZOldTaskMode::cooperative),
+       _cl(unloading_occurred) {
+     ZNMethodTable::nmethods_do_begin(false /* secondary */);
+   }
+@@ -408,12 +420,21 @@ public:
+   }
+ 
+   virtual void work() {
++    // The Old driver temporarily leaves STS while waiting for this task.
++    // Each unlink worker therefore owns its STS membership directly and can
++    // leave it together with Old-preemption participation at a safe poll.
++    SuspendibleThreadSetJoiner sts_joiner(ZOldPreemption::joined());
+     ZNMethodTable::nmethods_do(false /* secondary */, &_cl);
+   }
+ };
+ 
+ void ZNMethod::unlink(ZWorkers* workers, bool unloading_occurred) {
+   ZNMethodUnlinkTask task(unloading_occurred);
++  // Keep begin/end under the caller's existing STS membership, but do not
++  // leave that driver STS member blocked waiting for cooperative workers.
++  // Otherwise a Young safepoint could wait for the driver while the workers
++  // are parked waiting for that same Young collection to finish.
++  SuspendibleThreadSetLeaver sts_leaver(ZOldPreemption::joined());
+   workers->run(&task);
+ }
+ 
+diff --git a/src/hotspot/share/gc/z/zUnload.cpp b/src/hotspot/share/gc/z/zUnload.cpp
+index 3dc7ecd..3653630 100644
+--- a/src/hotspot/share/gc/z/zUnload.cpp
++++ b/src/hotspot/share/gc/z/zUnload.cpp
+@@ -33,15 +33,26 @@
+ #include "gc/z/zGeneration.inline.hpp"
+ #include "gc/z/zLock.inline.hpp"
+ #include "gc/z/zNMethod.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zStat.hpp"
+ #include "gc/z/zUncoloredRoot.inline.hpp"
+ #include "gc/z/zUnload.hpp"
++#include "logging/log.hpp"
+ #include "memory/metaspaceUtils.hpp"
+ #include "oops/access.inline.hpp"
++#include "runtime/os.hpp"
+ 
+ static const ZStatSubPhase ZSubPhaseConcurrentClassesUnlink("Concurrent Classes Unlink", ZGenerationId::old);
+ static const ZStatSubPhase ZSubPhaseConcurrentClassesPurge("Concurrent Classes Purge", ZGenerationId::old);
+ 
++static double elapsed_ms(double start) {
++  return (os::elapsedTime() - start) * 1000.0;
++}
++
++static void log_unload_subphase(const char* operation, const char* subphase, double duration_ms) {
++  log_debug(gc, preempt)("Old %s subphase=%s duration=%.3fms", operation, subphase, duration_ms);
++}
++
+ class ZIsUnloadingOopClosure : public OopClosure {
+ private:
+   const uintptr_t _color;
+@@ -140,15 +151,39 @@ void ZUnload::unlink() {
+   ZStatTimerOld timer(ZSubPhaseConcurrentClassesUnlink);
+   SuspendibleThreadSetJoiner sts_joiner;
+   bool unloading_occurred;
++  double active_ms = 0.0;
+ 
++  double start = os::elapsedTime();
+   {
+     MutexLocker ml(ClassLoaderDataGraph_lock);
+     unloading_occurred = SystemDictionary::do_unloading(ZGeneration::old()->gc_timer());
+   }
++  double duration = elapsed_ms(start);
++  active_ms += duration;
++  log_unload_subphase("Class Unlink", "SystemDictionary", duration);
++  ZOldPreemption::poll(true);
+ 
++  start = os::elapsedTime();
+   Klass::clean_weak_klass_links(unloading_occurred);
++  duration = elapsed_ms(start);
++  active_ms += duration;
++  log_unload_subphase("Class Unlink", "Klass Weak Links", duration);
++  ZOldPreemption::poll(true);
++
++  start = os::elapsedTime();
+   ZNMethod::unlink(_workers, unloading_occurred);
++  duration = elapsed_ms(start);
++  active_ms += duration;
++  log_unload_subphase("Class Unlink", "ZNMethod Unlink", duration);
++  ZOldPreemption::poll(true);
++
++  start = os::elapsedTime();
+   DependencyContext::cleaning_end();
++  duration = elapsed_ms(start);
++  active_ms += duration;
++  log_unload_subphase("Class Unlink", "Dependency Cleaning End", duration);
++  log_debug(gc, preempt)("Old Class Unlink active=%.3fms", active_ms);
++  ZOldPreemption::poll(true);
+ }
+ 
+ void ZUnload::purge() {
+@@ -158,13 +193,20 @@ void ZUnload::purge() {
+ 
+   ZStatTimerOld timer(ZSubPhaseConcurrentClassesPurge);
+ 
++  double start = os::elapsedTime();
+   {
+     SuspendibleThreadSetJoiner sts_joiner;
+     ZNMethod::purge();
+   }
++  log_unload_subphase("Class Purge", "ZNMethod Purge", elapsed_ms(start));
+ 
++  start = os::elapsedTime();
+   ClassLoaderDataGraph::purge(/*at_safepoint*/false);
++  log_unload_subphase("Class Purge", "ClassLoaderDataGraph Purge", elapsed_ms(start));
++
++  start = os::elapsedTime();
+   CodeCache::purge_exception_caches();
++  log_unload_subphase("Class Purge", "Exception Cache Purge", elapsed_ms(start));
+ }
+ 
+ void ZUnload::finish() {
