@@ -1,0 +1,81 @@
+name: Windows Old Preemption JDK
+
+on:
+  push:
+    branches:
+      - pr/old-preemption-windows
+
+permissions:
+  contents: read
+
+env:
+  MSYS2_PATH_TYPE: minimal
+  CHERE_INVOKING: 1
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout tiny builder branch
+        uses: actions/checkout@v6
+
+      - name: Save patch outside the workspace
+        shell: cmd
+        run: copy /y old-preemption.patch "%RUNNER_TEMP%\old-preemption.patch"
+
+      - name: Checkout OpenJDK baseline on the runner
+        uses: actions/checkout@v6
+        with:
+          repository: openjdk/jdk25u
+          ref: 1fac148c2dcc5c2f065999ff3562a76e3c699d0f
+          persist-credentials: false
+          clean: true
+
+      - name: Apply patch on the runner
+        shell: cmd
+        run: |
+          git config core.autocrlf false
+          git apply --check "%RUNNER_TEMP%\old-preemption.patch"
+          git apply "%RUNNER_TEMP%\old-preemption.patch"
+
+      - name: Prepare MSYS2
+        uses: ./.github/actions/get-msys2
+
+      - name: Download and verify boot JDK
+        id: bootjdk
+        uses: ./.github/actions/get-bootjdk
+        with:
+          platform: windows-x64
+
+      - name: Build release JDK and package
+        shell: env /usr/bin/bash --login -eo pipefail {0}
+        env:
+          PATH: ''
+          JDK_BOOT_HOME: ${{ steps.bootjdk.outputs.path }}
+          JOBS: '4'
+        run: |
+          mkdir -p build/windows-delivery
+          git rev-parse HEAD > build/windows-delivery/SOURCE-BASE-COMMIT.txt
+          sha256sum "$RUNNER_TEMP/old-preemption.patch" > build/windows-delivery/PATCH-SHA256.txt
+          bash preemption/build-windows.sh 2>&1 | tee build/windows-delivery/build.log
+
+      - name: Upload Windows JDK
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-x64-jdk-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/windows-delivery/*.zip
+            build/windows-delivery/*.sha256
+            build/windows-delivery/SOURCE-BASE-COMMIT.txt
+            build/windows-delivery/PATCH-SHA256.txt
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Preserve build log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-build-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/windows-delivery/build.log
+          if-no-files-found: ignore

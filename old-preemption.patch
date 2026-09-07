@@ -1,0 +1,1721 @@
+diff --git a/.github/workflows/preemption-windows.yml b/.github/workflows/preemption-windows.yml
+new file mode 100644
+index 000000000..c149741af
+--- /dev/null
++++ b/.github/workflows/preemption-windows.yml
+@@ -0,0 +1,55 @@
++name: Windows Old Preemption JDK
++
++on:
++  push:
++    branches:
++      - pr/old-preemption-windows
++  workflow_dispatch:
++
++permissions:
++  contents: read
++
++env:
++  MSYS2_PATH_TYPE: minimal
++  CHERE_INVOKING: 1
++
++jobs:
++  windows:
++    runs-on: windows-2022
++    timeout-minutes: 120
++    steps:
++      - uses: actions/checkout@v6
++      - name: Prepare MSYS2
++        uses: ./.github/actions/get-msys2
++      - name: Download and verify boot JDK
++        id: bootjdk
++        uses: ./.github/actions/get-bootjdk
++        with:
++          platform: windows-x64
++      - name: Build release JDK and package
++        shell: env /usr/bin/bash --login -eo pipefail {0}
++        env:
++          PATH: ''
++          JDK_BOOT_HOME: ${{ steps.bootjdk.outputs.path }}
++          JOBS: '4'
++        run: |
++          mkdir -p build/windows-delivery
++          git rev-parse HEAD > build/windows-delivery/SOURCE-COMMIT.txt
++          bash preemption/build-windows.sh 2>&1 | tee build/windows-delivery/build.log
++      - name: Upload Windows JDK
++        uses: actions/upload-artifact@v6
++        with:
++          name: windows-x64-jdk-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
++          path: |
++            build/windows-delivery/*.zip
++            build/windows-delivery/*.sha256
++            build/windows-delivery/SOURCE-COMMIT.txt
++          if-no-files-found: error
++          compression-level: 0
++      - name: Preserve build log
++        if: always()
++        uses: actions/upload-artifact@v6
++        with:
++          name: windows-build-log-${{ github.run_id }}-${{ github.run_attempt }}
++          path: build/windows-delivery/build.log
++          if-no-files-found: ignore
+diff --git a/preemption/LatencyProbe.java b/preemption/LatencyProbe.java
+new file mode 100644
+index 000000000..f658a7b0c
+--- /dev/null
++++ b/preemption/LatencyProbe.java
+@@ -0,0 +1,51 @@
++import java.lang.ref.Reference;
++import java.util.Arrays;
++import java.util.concurrent.atomic.AtomicReference;
++import jdk.test.whitebox.WhiteBox;
++
++/** Identical workload for an unmodified and a patched HotSpot of the same revision. */
++public class LatencyProbe {
++    static volatile Object sink;
++    public static void main(String[] args) throws Exception {
++        WhiteBox wb = WhiteBox.getWhiteBox();
++        Object[] old = new Object[64000];
++        for (int i = 0; i < old.length; i++) old[i] = new byte[512];
++        wb.fullGC();
++        for (int i = 0; i < old.length; i += 2) old[i] = null;
++        long[] majors = new long[8];
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread driver = new Thread(() -> {
++            try {
++                for (int i = 0; i < majors.length; i++) {
++                    long start = System.nanoTime();
++                    wb.fullGC();
++                    majors[i] = System.nanoTime() - start;
++                    Thread.sleep(5);
++                }
++            } catch (Throwable t) { failure.set(t); }
++        });
++        driver.setDaemon(true);
++        long start = System.nanoTime();
++        long allocated = 0;
++        long[] samples = new long[100000];
++        int count = 0;
++        driver.start();
++        while (driver.isAlive() || count < 200) {
++            if (count == samples.length || System.nanoTime() - start > 180_000_000_000L)
++                throw new AssertionError("Major progress timeout");
++            for (int i = 0; i < 128; i++) { sink = new byte[8192]; allocated += 8192; }
++            long t = System.nanoTime();
++            wb.youngGC();
++            samples[count++] = System.nanoTime() - t;
++        }
++        driver.join();
++        if (failure.get() != null) throw new AssertionError(failure.get());
++        Arrays.sort(samples, 0, count);
++        double seconds = (System.nanoTime() - start) / 1e9;
++        System.out.printf("RESULT samples=%d minor_p50_ms=%.3f minor_p99_ms=%.3f minor_max_ms=%.3f major_mean_ms=%.3f throughput_MiB_s=%.3f%n",
++            count, samples[count / 2] / 1e6, samples[(int) Math.ceil(count * .99) - 1] / 1e6,
++            samples[count - 1] / 1e6, Arrays.stream(majors).average().orElseThrow() / 1e6,
++            allocated / (1024.0 * 1024.0) / seconds);
++        Reference.reachabilityFence(old);
++    }
++}
+diff --git a/preemption/README.md b/preemption/README.md
+new file mode 100644
+index 000000000..3c779b171
+--- /dev/null
++++ b/preemption/README.md
+@@ -0,0 +1,103 @@
++# Old preemption development checkpoint
++
++Baseline: OpenJDK 25u `1fac148c2dcc5c2f065999ff3562a76e3c699d0f`.
++This is an experimental implementation requiring the validation described below.
++The previous transient environment was lost. Recovered commits form a new history;
++the earlier HotSpot startup observation does not validate this reconstruction.
++
++## Protocol and changes
++
++| Files under `src/hotspot/share/gc/z/` | Purpose |
++| --- | --- |
++| `zOldPreemption.hpp`, `.cpp` | Old-local condition-variable participation, stack-preserving park/resume, cycle/epoch/progress logs |
++| `zDriver.cpp` | Request before acquiring the shared driver lock; release the hold after Minor and driver unlock |
++| `zTask.hpp`, `.cpp`, `zWorkers.hpp`, `.cpp` | Classify audited tasks; transfer participation from waiting driver to active Old workers |
++| `zMark.cpp`, `zMarkTerminate.inline.hpp` | Poll between mark entries; publish both generations' local stacks; leave participation around termination waits |
++| `zRelocate.hpp`, `.cpp` | Reference-count relocation holds so safepoint end cannot release the Minor hold; keep the original iterator/task/forwardings |
++| `zGeneration.cpp` | Driver phase boundaries and page checkpoints; preserve the Remap + Relocate Start transaction |
++| `zReferenceProcessor.cpp`, `zWeakRootsProcessor.cpp` | Park at existing safe STS yield sites without losing discovered-list locals |
++| `zRelocationSet.cpp` | Checkpoints at page installation/destruction boundaries |
++| `zBreakpoint.cpp` | Avoid preemption deadlocks while waiting for WhiteBox GC breakpoints |
++| `z_globals.hpp` | Diagnostic enable switch and a debug-build-only interruptible stress delay |
++
++Minor sets an Old-only request and waits for active participants to leave STS
++and park. Driver participation remains active throughout unaudited transactions.
++Audited tasks transfer participation to their workers; blocking mark termination
++and breakpoint waits release participation with RAII and reacquire it before
++continuing. Old marking publishes both generations' per-thread mark stacks before
++parking. Bitmap, stripe state, task objects and C++ local variables remain alive.
++No preemption path invokes abort or resets the Major cycle. Existing shutdown
++abort and worker resize behavior remain present.
++
++Once participants are stopped, Minor takes a relocation synchronization hold.
++The existing safepoint hold nests with it. Releasing a safepoint hold cannot wake
++the background iterator while the Minor hold remains. Minor runs and releases
++its driver lock, then releases relocation and participant holds.
++
++`-Xlog:gc+preempt=debug` records cycle, phase, request, epoch and progress snapshots,
++wait and pause durations, and Minor start/end. `gc+preempt=trace` adds worker
++park/resume events; use uptime/thread decorators when investigating latency.
++`mark_entries` counts processed stack entries, not unique marked objects;
++`relocated_pages` counts completed forwardings. These counters support diagnostics
++and cannot on their own prove heap correctness.
++
++## Boundaries and known limitations
++
++Mark follow, discovered-reference traversal, weak-root callbacks and relocation
++set installation can park in their original C++ call frames. Reset and selection
++poll between items; page-table iteration releases its safe-destroy guard first.
++
++Mark Roots, Mark Free, class unlink/purge internals, handshake/rendezvous, bulk
++selector operations and the Remap Young Roots + Relocate Start transaction remain
++serial. Their locks, CLD/nmethod lifetime, resurrection state and root/remset epoch
++invariants have not been proven safe for arbitrary-duration suspension inside
++those operations. Inter-operation checkpoints do not bound these operations.
++
++Relocate Start reserves queue workers before their tasks launch. The driver must
++run relocation setup and launch those workers before parking; otherwise a Minor
++would wait forever for reserved workers which never started.
++
++Relocation polls at page boundaries. A page/in-place transaction or hard page
++fault must finish first and may have substantial latency. **Urgent queued
++forwardings still run during a hold**: the original queue contract requires
++servicing callers which cannot enter a blocking state. Suppressing them can
++deadlock Young or mutators. Thus strict zero Old relocation during every Minor
++and the requested latency behavior under all paging/allocation-stall conditions
++are not established by this MVP. No new mutator bulk copying, pacing, priority
++changes, forced Old quantum, or full-Minor global STS synchronization was added.
++
++## Build and validate
++
++Read the checked-out `doc/building.md` and `bash configure --help` for host setup.
++Use `JDK_BOOT_HOME` (native JDK 24/25), `JTREG_HOME` (jtreg 8 image), and run
++`preemption/build-linux.sh` or, on Windows with Cygwin/MSYS2 plus Visual Studio
++2022 and Windows SDK, `preemption/build-windows.sh`. Extra arguments pass through
++to configure. `DEBUG_LEVEL=release` selects a release image after fastdebug tests.
++The Windows script has not itself produced a Windows JDK in this Linux host.
++
++There is no `hotspot_gc_z` group in this baseline. Use
++`make CONF=<conf> test TEST=test/hotspot/jtreg/gc/z` with
++`JTREG='JOBS=2;TIMEOUT_FACTOR=3;JAVA_OPTIONS=-XX:+UseZGC'`.
++First run `TEST=test/hotspot/jtreg/gc/z/TestOldPreemption.java`, then the whole
++directory, `gc/stress/gcold/TestGCOldWithZ.java` and
++`gc/stress/gcbasher/TestGCBasherWithZ.java`. Preserve `.jtr`, GC logs and crash files.
++
++The new stress test slows only Old safe polls using an interruptible monitor
++wait in fastdebug, keeps a young allocation/old-to-young pointer workload running,
++checks strong/weak/phantom references and reclamation, and requires completion of
++the same Major after at least 32 holds with monotonic progress. It requires
++observed Mark, reference-processing and relocation interruptions. This test is
++not a replacement for paging, class unloading, allocation-stall or in-place
++relocation tests, nor is a 32-pause run evidence of hundreds of pauses per cycle.
++
++`LatencyProbe.java` uses only upstream WhiteBox calls for a same-workload baseline
++comparison. Compile it with `test/lib/jdk/test/whitebox/WhiteBox.java` and its
++parser dependencies, then run each JDK with `-XX:+UseZGC -Xms256m -Xmx512m
++-XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI -Xbootclasspath/a:<classes>
++-cp <classes> -Xlog:gc*:file=<log> LatencyProbe`.
++The reported Minor wall time includes request delivery and any preemption wait.
++Record Allocation Stall log counts separately. A warm resident-heap comparison
++does not establish behavior with the user's externally imposed priorities and
++swapped-out Old pages.
++
++Final test/build evidence and delivery locations are recorded in `RESULTS.md`.
+diff --git a/preemption/RESULTS.md b/preemption/RESULTS.md
+new file mode 100644
+index 000000000..fe45b325d
+--- /dev/null
++++ b/preemption/RESULTS.md
+@@ -0,0 +1,103 @@
++# OpenJDK 25u Old pause/resume：交付状态
++
++本次交付是可继续开发、回滚的实验性源码仓库和补丁。任务尚未全部完成：没有可交付的完整 Linux / Windows JDK 二进制，官方 jtreg 全套和基线性能对照也未完成。
++
++## 1. 源码与提交
++
++上游基线为 `1fac148c2dcc5c2f065999ff3562a76e3c699d0f`，OpenJDK 25u，版本字符串为 25.0.5-internal。
++
++保留完整源码及独立 `.git`；上游历史为浅克隆，包含基线和本次开发提交。`preemption-baseline` 标签可用于回滚；外层 `patches` 为 `git format-patch` 导出，`GIT-STATE.txt` 记录最终 HEAD、提交列表与工作区状态。
++
++已恢复的原提交：
++
++- `89ebfb04f2d99358d7293f50562740676ef96742`：Old 协调器、Mark/Relocate 及安全检查点。
++- `3308727cc`：压力测试与 Linux / Windows 构建脚本。
++- `715eedcf8`：基线对照程序及协议限制说明。
++- `c28f8785f96d4545c3e9ff0d71bf667c845a5afa`：恢复实际通过运行的压力测试配置。它重建了环境丢失前 `40a061cc5`、`527765dcf` 的测试调整；这两个旧提交对象未保留下来。
++
++恢复后检查确认 C++ 源码与 `89ebfb04f` 完全一致。该 C++ 版本确实完成过 Linux fastdebug 构建和下述独立压力运行。
++
++## 2. 修改文件及原因
++
++以下 C++ 路径均位于 `src/hotspot/share/gc/z/`。
++
++| 文件 | 修改原因 |
++| --- | --- |
++| zOldPreemption.hpp / .cpp | Old 专用条件变量协调器，参与者登记、原栈 park/resume、周期与进度日志 |
++| zDriver.cpp | Minor 在获取共享 driver lock 前提出暂停，释放 driver lock 后恢复 Old |
++| zTask.hpp / .cpp | 区分已审计的 cooperative、relocation 和 serial task |
++| zWorkers.hpp / .cpp | 在等待的 Old driver 与运行的 Old workers 之间转移参与权 |
++| zMark.cpp | 在 mark entry 批次边界暂停；保留原任务、bitmap、stacks，记录处理量 |
++| zMarkTerminate.inline.hpp | 在 termination 等待期间退出参与，按正确锁顺序恢复 |
++| zRelocate.hpp / .cpp | 将 safepoint 与 Minor relocation hold 改为可嵌套计数；保留原 iterator / forwarding |
++| zGeneration.cpp | 阶段和 page 边界检查点；保留 remap / epoch 事务 |
++| zReferenceProcessor.cpp | 在现有安全 yield 点保留 discovered-list 局部链表并原栈暂停 |
++| zWeakRootsProcessor.cpp | 弱根安全回调检查点 |
++| zRelocationSet.cpp | 安装和销毁条目边界检查点 |
++| zBreakpoint.cpp | 等待 WhiteBox GC breakpoint 时退出参与，避免测试锁循环 |
++| z_globals.hpp | 诊断开关与仅 debug build 使用的可中断压力延时 |
++| test/hotspot/jtreg/gc/z/TestOldPreemption.java | 重复抢占、同周期进度、强弱引用、回收和阶段覆盖验证 |
++| preemption/build-linux.sh / build-windows.sh | 对应原生构建环境的 configure、images 和 gc/z 测试入口 |
++| preemption/LatencyProbe.java | 两套同基线 JDK 的相同 WhiteBox 工作负载对照程序 |
++| preemption/README.md / RESULTS.md | 协议边界、复现说明和实际交付状态 |
++
++## 3. 暂停协议
++
++Minor 设置 Old 专用 request，等待活跃参与者退出 STS 并 park。Old Mark 在退出 STS 前发布两代的线程本地 mark stacks；调用栈、bitmap、上下文和任务对象保留。等待 worker 的 driver 暂时让出参与权；未经审计的串行事务仍由 driver 参与权保护。
++
++随后 Minor 获取 Old relocation hold，再获取 driver lock 并运行。Minor 完成且 driver lock 释放后，解除 relocation hold 与参与者暂停。safepoint hold 使用同一计数，不能提前释放 Minor 的 hold。暂停路径不调用 abort，不新建 Major，不清 marking state，也不改变 epoch。
++
++无线程优先级代码，无 Old boost、强制 Old quantum、新增 mutator 大块搬运或 pacing。没有跨整个 Minor 持有全局 STS synchronize。
++
++## 4. 可以抢占的部分
++
++Mark follow、discovered reference 遍历、弱根回调、relocation-set 安装，以及 reset / select 的条目边界。Relocate 的后台 iterator 在现有 page 边界同步，任务和 forwarding 状态持续存在。
++
++## 5. 尚不可抢占的部分与限制
++
++- Remap Young Roots + Relocate Start：保留同一个 driver-lock 事务，以维持 root/remset 与 relocation epoch 一致。
++- Relocate Setup：Relocate Start 已预登记 worker 数量，必须完成启动，才能等待它们 park，否则会等待尚未启动的 worker。
++- 当前 page/in-place relocation 事务：必须完成到同步边界；可能包含多次 page fault，尚无低延迟上界证明。
++- Mark Roots、Mark Free、class unlink/purge 内部、handshake/rendezvous、bulk selector 操作：尚未证明持锁、CLD/nmethod 生命周期及相关 invariant 允许任意长暂停。只在部分操作之间提供检查点。
++- 紧急 forwarding 队列在 hold 期间仍被服务。原队列调用者可能无法进入可阻塞状态，完全停止服务会使 Young 或 mutator 死锁。因此尚未实现“任何情况下整个 Minor 期间 Old relocation 都完全静止”。
++
++## 6. 实际验证结果
++
++以下运行发生在工作目录第二次丢失之前。原始日志文件没有成功保存；这里保留的是本会话工具返回的结果，不冒充原始日志包。
++
++- Linux x86_64 fastdebug：1,233 个 HotSpot 编译单元完成，完整 `images` 目标成功；镜像运行 UseZGC 的 version 检查成功。
++- 独立压力测试：第三轮运行成功。输出为：
++
++```text
++PREEMPTION verified pauses={1=417, 867=141, 419=294, 714=152} phases=[Mark Roots, Mark, Process Non-Strong, Weak Roots, Class Unlink, Relocate, Select Relocation Set]
++```
++
++  最大同周期暂停数为 417；四个被抢占周期均完成。测试检查暂停两端 cycle / epoch、Mark 处理量不变、跨恢复进度不回退、强引用哨兵、存活 weak referent、8,192 个 weak / phantom 入队，以及释放强根后的 Old 回收。日志中的 Class Unlink 表示操作边界覆盖，不代表其内部已可抢占。
++
++- 前两轮压力测试因 Process Non-Strong 未被抢占而失败，未删除断言。日志显示请求线程进入 Allocation Stall；其中一次为约 9 秒。后来降低垃圾生成速率、给晋升预留 2 GiB 最大堆，并将测试的 Minor 请求间隔设为 20 ms，才覆盖全部目标阶段。此调整仅作用于测试，不是 JVM 的 Old 运行配额。
++- 官方 gc/z jtreg：已发起，但 make 测试入口在镜像重建阶段失败，没有已确认的测试通过结果。
++- gcold / gcbasher、完整 class unloading / allocation stall 回归、slowdebug：未完成。
++- 未修改基线 HotSpot 构建未完成；Minor 分位数、Allocation Stall 汇总、Major 完成时间与吞吐量对照未完成。
++- 最终恢复检查：git diff --check 通过，C++ 与已运行版本无差异，构建脚本 shell 语法检查通过。当前恢复目录未重新编译。
++
++## 7. Linux 构建位置
++
++构建成功时的路径如下；该目录随后丢失，当前不是有效下载位置：
++
++```text
++/workspace/scratch/72958b020219/jdk25u-recovery/build/linux-preempt-fastdebug/images/jdk
++```
++
++后续 `make test` 触发镜像重建，打包与重建发生冲突，导致压缩包缺少文件。这是交付顺序错误；该包已重命名为 `INCOMPLETE-NOT-A-JDK-openjdk25u-527765dcf.tar.gz`，不能作为 JDK 使用。本次没有完整 Linux 二进制交付。
++
++## 8. Windows 构建位置
++
++无。本环境没有可执行官方 Windows 构建的主机，未进行也未宣称 Linux 到 Windows 的完整交叉编译。保留同一补丁和 Windows 原生 Cygwin/MSYS2 + Visual Studio 2022 构建脚本；脚本尚未在 Windows 上验证。
++
++## 9. 已知风险与下一步
++
++这是通过一项独立 fastdebug 压力运行的 MVP，不是满足全部成功标准的游戏 JVM。紧急 relocation 队列、上述串行区、真实冷页 paging、内存耗尽、worker resize 和完整 class unloading 仍需系统验证。当前无证据证明用户实际游戏中的延迟问题已解决。
++
++下一步应从本包恢复构建，先复制一份固定的完整镜像，再对该镜像运行官方 jtreg / 压力测试；镜像生成、测试前置构建和打包必须串行，确认 tar 成功并验证内容后才能上传。然后完成无构建负载干扰的基线对照及 Windows 原生构建。
++
++当前暂停长构建是因为用户指出额度已不足，且两次工作目录丢失后没有可复用的构建现场；保留可继续开发的实际代码，不以再次启动数十分钟重编译代替本次交付。
+diff --git a/preemption/WINDOWS.md b/preemption/WINDOWS.md
+new file mode 100644
+index 000000000..801d5b891
+--- /dev/null
++++ b/preemption/WINDOWS.md
+@@ -0,0 +1,43 @@
++# Windows 出包入口
++
++本入口生成完整 Windows x86_64 JDK，默认 release，省略 jtreg、gtest 和压力测试。
++当前没有接入 Windows 构建机，因此脚本和 workflow 尚未在 Windows 上运行，不能当作已经编好的 JDK。
++
++## 使用 GitHub 的 Windows 构建机
++
++Fork `https://github.com/openjdk/jdk25u` 到自己的 GitHub 账号，并先在 fork 的 Actions 页启用 workflows。
++在本包指定的上游基线上应用补丁，推送到 `pr/old-preemption-windows` 分支后，
++`Windows Old Preemption JDK` 自动开始构建。该分支也匹配上游工作流已有的 `pr/*` 排除规则，
++不会额外启动上游的跨平台构建和测试。完整可复制命令见 diff 压缩包内的 `README.md`。
++若将本工作流放到默认分支，也可以使用 `Run workflow`；仅放在其他分支时无需寻找该按钮。
++原有 OpenJDK actions 准备 MSYS2，并按照源码中的 SHA256 下载、校验 Windows boot JDK；
++编译使用 Windows runner 上的 Visual Studio 2022。无 jtreg 下载或执行步骤。
++
++成功后下载 `windows-x64-jdk-...` artifact，里面的 `openjdk25u-oldpreempt-windows-x64-...zip`
++才是 JDK 压缩包；内部只有一个 `jdk` 目录。解压并把游戏启动器的 Java 路径设置为：
++
++```text
++<解压目录>\jdk\bin\javaw.exe
++```
++
++JVM 参数：
++
++```text
++-XX:+UseZGC
++```
++
++Old preemption 默认开启，线程优先级仍由你在 JVM 外部设置。
++这是尚未完成全部正确性验收的实验版本；紧急 forwarding 等限制仍见 `README.md` 和 `RESULTS.md`。
++
++## 在已有 Windows 编译环境本地运行
++
++需要 `doc/building.md` 中的 MSYS2/Cygwin、VS 2022 C++ 工具与 Windows SDK（含英文组件），
++以及 Windows x64 JDK 24 或 25。源码路径避免空格。
++在 MSYS2/Cygwin 中执行（修改 boot JDK 路径）：
++
++```bash
++JDK_BOOT_HOME=/c/jdk-25 JOBS=4 bash preemption/build-windows.sh
++```
++
++输出在 `build/windows-delivery/`。流程先完成 `make images`，再检查关键文件及带补丁 JVM 的
++ZGC 启动，最后生成 ZIP、验证 ZIP 完整性并写入 SHA256；不会同时重建和打包镜像。
+diff --git a/preemption/build-linux.sh b/preemption/build-linux.sh
+new file mode 100755
+index 000000000..631c1ae18
+--- /dev/null
++++ b/preemption/build-linux.sh
+@@ -0,0 +1,17 @@
++#!/usr/bin/env bash
++set -euo pipefail
++: "${JDK_BOOT_HOME:?Set JDK_BOOT_HOME to a native JDK 24 or 25}"
++: "${JTREG_HOME:?Set JTREG_HOME to a jtreg 8 image}"
++cd "$(dirname "$0")/.."
++conf="linux-oldpreempt-${DEBUG_LEVEL:-fastdebug}"
++bash configure --with-conf-name="$conf" --with-boot-jdk="$JDK_BOOT_HOME" \
++  --with-jtreg="$JTREG_HOME" --with-debug-level="${DEBUG_LEVEL:-fastdebug}" \
++  --with-jvm-variants=server --with-native-debug-symbols=internal \
++  --with-freetype=bundled --disable-javac-server \
++  --with-version-opt="oldpreempt.$(git rev-parse --short HEAD)" "$@"
++make CONF="$conf" JOBS="${JOBS:-4}" images
++if [[ ${DEBUG_LEVEL:-fastdebug} == fastdebug ]]; then
++  make CONF="$conf" test TEST=test/hotspot/jtreg/gc/z \
++    JTREG='JOBS=2;TIMEOUT_FACTOR=3;JAVA_OPTIONS=-XX:+UseZGC'
++fi
++printf 'JDK image: %s/build/%s/images/jdk\n' "$PWD" "$conf"
+diff --git a/preemption/build-windows.sh b/preemption/build-windows.sh
+new file mode 100755
+index 000000000..a376e37d8
+--- /dev/null
++++ b/preemption/build-windows.sh
+@@ -0,0 +1,34 @@
++#!/usr/bin/env bash
++set -euo pipefail
++# Run on Windows in the Cygwin/MSYS2 environment described by doc/building.md.
++case "$(uname -s)" in CYGWIN*|MSYS*|MINGW*) ;; *) echo 'Requires a native Windows build host' >&2; exit 2;; esac
++: "${JDK_BOOT_HOME:?Set JDK_BOOT_HOME to a Windows x64 JDK 24 or 25}"
++cd "$(dirname "$0")/.."
++level=${DEBUG_LEVEL:-release}
++revision=$(git rev-parse --short HEAD)
++conf="windows-oldpreempt-$level"
++bash configure --with-conf-name="$conf" --with-boot-jdk="$JDK_BOOT_HOME" \
++  --with-debug-level="$level" \
++  --with-jvm-variants=server --with-native-debug-symbols=none \
++  --with-toolchain-version=2022 --disable-javac-server \
++  --with-version-opt="oldpreempt.$revision" "$@"
++make CONF="$conf" JOBS="${JOBS:-4}" images
++
++# Finish the build before touching the image. Do not run make test here: it can
++# rebuild the image during packaging. Only check the deliverable can start.
++image="$PWD/build/$conf/images/jdk"
++for required in bin/java.exe bin/javac.exe bin/server/jvm.dll lib/modules release; do
++  test -s "$image/$required" || { echo "Incomplete JDK: $required" >&2; exit 3; }
++done
++timeout 30s "$image/bin/java.exe" -XX:+UnlockDiagnosticVMOptions \
++  -XX:+UseZGC -XX:+ZOldGCPreemption -version
++
++out="$PWD/build/windows-delivery"
++mkdir -p "$out"
++name="openjdk25u-oldpreempt-windows-x64-$revision-$level-$(date -u +%Y%m%dT%H%M%S)"
++archive="$out/$name.zip"
++test ! -e "$archive"
++(cd "$(dirname "$image")" && zip -q -r "$archive" jdk)
++unzip -tqq "$archive"
++(cd "$out" && sha256sum "$name.zip" > "$name.zip.sha256")
++printf 'Windows JDK ZIP: %s\n' "$archive"
+diff --git a/preemption/checkpoint.sh b/preemption/checkpoint.sh
+new file mode 100755
+index 000000000..7148ac488
+--- /dev/null
++++ b/preemption/checkpoint.sh
+@@ -0,0 +1,91 @@
++#!/usr/bin/env bash
++# Incremental backups for this Work session. Requires git, GNU tar, flock,
++# timeout, python3 and the supplied authenticated Library upload helper.
++set -euo pipefail
++repo=$(cd "$(dirname "$0")/.." && pwd)
++state=${CHECKPOINT_STATE:-"$repo/../checkpoint-state"}
++helper=${CHECKPOINT_UPLOAD_HELPER:?Set the absolute library_upload.py helper path}
++base=${CHECKPOINT_BASE:-89ebfb04f2d99358d7293f50562740676ef96742}
++mkdir -p "$state"
++state=$(cd "$state" && pwd)
++
++if [[ ${1:---once} == --watch ]]; then
++  while :; do
++    deadline=$(($(date +%s) + 300))
++    timeout 290s bash "$0" --once >> "$state/watch.log" 2>&1 ||
++      printf '%s backup failed; previous acknowledged base retained\n' "$(date -u +%FT%TZ)" >> "$state/watch.log"
++    delay=$((deadline - $(date +%s)))
++    ((delay > 0)) || delay=1
++    sleep "$delay"
++  done
++fi
++[[ ${1:---once} == --once ]] || { echo 'Use --once or --watch' >&2; exit 2; }
++
++exec 9>"$state/lock"
++flock -n 9 || exit 0
++cd "$repo"
++head=$(git rev-parse HEAD)
++previous=$base
++[[ ! -f "$state/acknowledged-head" ]] || previous=$(cat "$state/acknowledged-head")
++git cat-file -e "$previous^{commit}"
++id="openjdk25u-incremental-${head:0:9}-$(date -u +%Y%m%dT%H%M%S%N)"
++stage="$state/$id"
++mkdir "$stage"
++printf '%s\n' "$head" > "$stage/HEAD.txt"
++printf '%s\n' "$previous" > "$stage/PREREQUISITE.txt"
++git show-ref > "$stage/REFS.txt"
++git status --porcelain=v1 -z > "$stage/status.nul"
++git diff --binary HEAD > "$stage/working-tree.patch"
++git ls-files --others --exclude-standard -z > "$stage/untracked.nul"
++tar --null -T "$stage/untracked.nul" -cf "$stage/untracked.tar"
++if [[ "$head" != "$previous" ]]; then
++  timeout 30s git bundle create "$stage/commits.bundle" --all "^$previous"
++  timeout 30s git bundle verify "$stage/commits.bundle" > "$stage/bundle-verification.txt" 2>&1
++  git format-patch --output-directory "$stage/patches" "$previous..$head" > "$stage/patch-list.txt"
++fi
++
++# A live build cache is separate from the consistent source snapshot. Never
++# present an archive with files changing during capture as a usable JDK/cache.
++paths=()
++[[ ! -d build ]] || paths+=(build)
++[[ ! -d preemption/evidence ]] || paths+=(preemption/evidence)
++cache_ok=false
++if ((${#paths[@]})); then
++  [[ ! -f "$state/cache.snar" ]] || cp "$state/cache.snar" "$stage/cache-next.snar"
++  if timeout 90s tar --listed-incremental="$stage/cache-next.snar" \
++      -czf "$stage/build-and-evidence.tar.gz" "${paths[@]}" 2> "$stage/cache-capture.log"; then
++    cache_ok=true
++  else
++    # These are temporary files created by this invocation, never user files.
++    rm -f -- "$stage/build-and-evidence.tar.gz" "$stage/cache-next.snar"
++    printf 'Live cache capture failed; source backup remains valid. Cache base was not advanced.\n' > "$stage/CACHE-DEFERRED.txt"
++  fi
++fi
++
++# Detect concurrent source edits before publishing this checkpoint.
++[[ "$(git rev-parse HEAD)" == "$head" ]] || exit 3
++git diff --binary HEAD > "$stage/working-tree-after.patch"
++cmp "$stage/working-tree.patch" "$stage/working-tree-after.patch"
++printf '%s\n' 'Restore into a separate directory containing the previous acknowledged checkpoint.' \
++  'Verify/fetch commits.bundle, check out HEAD.txt, then apply working-tree.patch and extract untracked.tar.' \
++  'Restore GNU tar incremental build-and-evidence archives in timestamp order only into that recovery directory.' \
++  'A restored build cache requires make validation; it is not a validated JDK distribution.' > "$stage/RESTORE.txt"
++archive="$state/$id.tar.gz"
++timeout 120s tar -czf "$archive" -C "$state" "$id"
++timeout 30s gzip -t "$archive"
++python3 - "$archive" > "$stage/upload.json" <<'PY'
++import json,sys
++json.dump({'uploads':[{'local_path':sys.argv[1],'purpose':'create_library_file'}]},sys.stdout)
++PY
++timeout 180s python3 "$helper" < "$stage/upload.json" > "$stage/upload-result.json"
++python3 - "$stage/upload-result.json" <<'PY'
++import json,sys
++r=json.load(open(sys.argv[1]))['results']
++assert len(r)==1 and r[0]['status']=='succeeded', r
++print('BACKUP SAVED:',r[0]['local_path'])
++PY
++# Advance bases ONLY after the remote upload has acknowledged success.
++printf '%s\n' "$head" > "$state/acknowledged-head.next"
++mv "$state/acknowledged-head.next" "$state/acknowledged-head"
++if $cache_ok; then cp "$stage/cache-next.snar" "$state/cache.snar.next"; mv "$state/cache.snar.next" "$state/cache.snar"; fi
++printf '%s\n' "$archive" > "$state/latest-archive"
+diff --git a/src/hotspot/share/gc/z/zBreakpoint.cpp b/src/hotspot/share/gc/z/zBreakpoint.cpp
+index 00e91c2c2..623b5f98f 100644
+--- a/src/hotspot/share/gc/z/zBreakpoint.cpp
++++ b/src/hotspot/share/gc/z/zBreakpoint.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include "gc/shared/concurrentGCBreakpoints.hpp"
+ #include "gc/z/zBreakpoint.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "runtime/mutexLocker.hpp"
+ #include "utilities/debug.hpp"
+ 
+@@ -50,13 +51,16 @@ void ZBreakpoint::at_after_gc() {
+ }
+ 
+ void ZBreakpoint::at_after_marking_started() {
++  ZOldPreemptionLeaver preemption_leaver;
+   ConcurrentGCBreakpoints::at("AFTER MARKING STARTED");
+ }
+ 
+ void ZBreakpoint::at_before_marking_completed() {
++  ZOldPreemptionLeaver preemption_leaver;
+   ConcurrentGCBreakpoints::at("BEFORE MARKING COMPLETED");
+ }
+ 
+ void ZBreakpoint::at_after_reference_processing_started() {
++  ZOldPreemptionLeaver preemption_leaver;
+   ConcurrentGCBreakpoints::at("AFTER CONCURRENT REFERENCE PROCESSING STARTED");
+ }
+diff --git a/src/hotspot/share/gc/z/zDriver.cpp b/src/hotspot/share/gc/z/zDriver.cpp
+index e8f7af179..22d720602 100644
+--- a/src/hotspot/share/gc/z/zDriver.cpp
++++ b/src/hotspot/share/gc/z/zDriver.cpp
+@@ -29,6 +29,7 @@
+ #include "gc/z/zCollectedHeap.hpp"
+ #include "gc/z/zDirector.hpp"
+ #include "gc/z/zDriver.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zGCIdPrinter.hpp"
+ #include "gc/z/zGeneration.inline.hpp"
+ #include "gc/z/zHeap.inline.hpp"
+@@ -62,6 +63,7 @@ ZDriverMajor* ZDriver::_major;
+ 
+ void ZDriver::initialize() {
+   _lock = new ZLock();
++  ZOldPreemption::initialize();
+ }
+ 
+ void ZDriver::lock() {
+@@ -187,7 +189,9 @@ class ZDriverScopeMinor : public StackObj {
+ void ZDriverMinor::gc(const ZDriverRequest& request) {
+   ZDriverScopeMinor scope(request, &_gc_timer);
+   ZGCIdMinor minor_id(gc_id());
++  ZOldPreemption::minor_start();
+   ZGeneration::young()->collect(ZYoungType::minor, &_gc_timer);
++  ZOldPreemption::minor_end();
+ }
+ 
+ static void handle_alloc_stalling_for_young() {
+@@ -204,6 +208,7 @@ void ZDriverMinor::run_thread() {
+     // Wait for GC request
+     const ZDriverRequest request = _port.receive();
+ 
++    ZOldPreemptionRequest preemption;
+     ZDriverLocker locker;
+ 
+     abortpoint();
+diff --git a/src/hotspot/share/gc/z/zGeneration.cpp b/src/hotspot/share/gc/z/zGeneration.cpp
+index 772c5a0a9..3cb1e5428 100644
+--- a/src/hotspot/share/gc/z/zGeneration.cpp
++++ b/src/hotspot/share/gc/z/zGeneration.cpp
+@@ -35,6 +35,7 @@
+ #include "gc/z/zBreakpoint.hpp"
+ #include "gc/z/zCollectedHeap.hpp"
+ #include "gc/z/zDriver.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zForwarding.hpp"
+ #include "gc/z/zForwardingTable.inline.hpp"
+ #include "gc/z/zGeneration.inline.hpp"
+@@ -188,6 +189,9 @@ void ZGeneration::select_relocation_set(bool promote_all) {
+   {
+     ZGenerationPagesIterator pt_iter(_page_table, _id, _page_allocator);
+     for (ZPage* page; pt_iter.next(&page);) {
++      if (is_old() && ZOldPreemption::requested()) {
++        pt_iter.yield([]() { ZOldPreemption::poll(false); });
++      }
+       if (!page->is_relocatable()) {
+         // Not relocatable, don't register
+         continue;
+@@ -240,6 +244,7 @@ void ZGeneration::select_relocation_set(bool promote_all) {
+   ZRelocationSetIterator rs_iter(&_relocation_set);
+   for (ZForwarding* forwarding; rs_iter.next(&forwarding);) {
+     _forwarding_table.insert(forwarding);
++    if (is_old()) ZOldPreemption::poll(false);
+   }
+ 
+   // Update statistics
+@@ -256,6 +261,7 @@ void ZGeneration::reset_relocation_set() {
+   ZRelocationSetIterator iter(&_relocation_set);
+   for (ZForwarding* forwarding; iter.next(&forwarding);) {
+     _forwarding_table.remove(forwarding);
++    if (is_old()) ZOldPreemption::poll(false);
+   }
+ 
+   // Reset relocation set
+@@ -996,6 +1002,7 @@ bool ZGenerationOld::should_record_stats() {
+ 
+ void ZGenerationOld::collect(ConcurrentGCTimer* timer) {
+   ZGenerationCollectionScopeOld scope(timer);
++  ZOldPreemptionCycle preemption;
+ 
+   // Phase 1: Concurrent Mark
+   concurrent_mark();
+@@ -1033,6 +1040,7 @@ void ZGenerationOld::collect(ConcurrentGCTimer* timer) {
+ 
+   abortpoint();
+ 
++  ZOldPreemption::phase("Remap + Relocate Start");
+   {
+     ZDriverLocker locker;
+ 
+@@ -1069,6 +1077,7 @@ void ZGenerationOld::concurrent_mark() {
+   ZStatTimerOld timer(ZPhaseConcurrentMarkOld);
+   ZBreakpoint::at_after_marking_started();
+   mark_roots();
++  ZOldPreemption::phase("Mark");
+   mark_follow();
+   ZBreakpoint::at_before_marking_completed();
+ }
+@@ -1091,26 +1100,31 @@ class VM_ZMarkEndOld : public VM_ZOperation {
+ };
+ 
+ bool ZGenerationOld::pause_mark_end() {
++  ZOldPreemption::phase("Mark End");
+   return VM_ZMarkEndOld().pause();
+ }
+ 
+ void ZGenerationOld::concurrent_mark_continue() {
++  ZOldPreemption::phase("Mark Continue");
+   ZStatTimerOld timer(ZPhaseConcurrentMarkContinueOld);
+   mark_follow();
+ }
+ 
+ void ZGenerationOld::concurrent_mark_free() {
++  ZOldPreemption::phase("Mark Free");
+   ZStatTimerOld timer(ZPhaseConcurrentMarkFreeOld);
+   mark_free();
+ }
+ 
+ void ZGenerationOld::concurrent_process_non_strong_references() {
++  ZOldPreemption::phase("Process Non-Strong");
+   ZStatTimerOld timer(ZPhaseConcurrentProcessNonStrongOld);
+   ZBreakpoint::at_after_reference_processing_started();
+   process_non_strong_references();
+ }
+ 
+ void ZGenerationOld::concurrent_reset_relocation_set() {
++  ZOldPreemption::phase("Reset Relocation Set");
+   ZStatTimerOld timer(ZPhaseConcurrentResetRelocationSetOld);
+   reset_relocation_set();
+ }
+@@ -1135,6 +1149,7 @@ class VM_ZVerifyOld : public VM_Operation {
+ };
+ 
+ void ZGenerationOld::pause_verify() {
++  ZOldPreemption::phase("Verify");
+   // Note that we block out concurrent young collections when performing the
+   // verification. The verification checks that store good oops in the
+   // old generation have a corresponding remembered set entry, or is in
+@@ -1150,6 +1165,7 @@ void ZGenerationOld::pause_verify() {
+ }
+ 
+ void ZGenerationOld::concurrent_select_relocation_set() {
++  ZOldPreemption::phase("Select Relocation Set");
+   ZStatTimerOld timer(ZPhaseConcurrentSelectRelocationSetOld);
+   select_relocation_set(false /* promote_all */);
+ }
+@@ -1182,6 +1198,8 @@ void ZGenerationOld::pause_relocate_start() {
+ }
+ 
+ void ZGenerationOld::concurrent_relocate() {
++  // The queue already reserves workers: launch them before driver parking.
++  ZOldPreemption::phase("Relocate Setup", false);
+   ZStatTimerOld timer(ZPhaseConcurrentRelocatedOld);
+   relocate();
+ }
+@@ -1321,6 +1339,7 @@ void ZGenerationOld::process_non_strong_references() {
+   _reference_processor.process_references();
+ 
+   // Process weak roots
++  ZOldPreemption::phase("Weak Roots");
+   _weak_roots_processor.process_weak_roots();
+ 
+   ClassUnloadingContext ctx(_workers.active_workers(),
+@@ -1328,6 +1347,7 @@ void ZGenerationOld::process_non_strong_references() {
+                             true /* lock_nmethod_free_separately */);
+ 
+   // Unlink stale metadata and nmethods
++  ZOldPreemption::phase("Class Unlink");
+   _unload.unlink();
+ 
+   // Perform a handshake. This is needed 1) to make sure that stale
+@@ -1338,18 +1358,22 @@ void ZGenerationOld::process_non_strong_references() {
+   // this point the mutator could see the unblocked state and pass
+   // this invalid oop through the normal barrier path, which would
+   // incorrectly try to mark the oop.
++  ZOldPreemption::phase("Handshake");
+   ZRendezvousHandshakeClosure cl;
+   Handshake::execute(&cl);
+ 
+   // GC threads are not part of the handshake above.
+   // Explicitly "handshake" them.
++  ZOldPreemption::phase("GC Rendezvous");
+   ZRendezvousGCThreads op;
+   VMThread::execute(&op);
+ 
+   // Unblock resurrection of weak/phantom references
++  ZOldPreemption::phase("Unblock Resurrection");
+   ZResurrection::unblock();
+ 
+   // Purge stale metadata and nmethods that were unlinked
++  ZOldPreemption::phase("Class Purge");
+   _unload.purge();
+ 
+   // Enqueue Soft/Weak/Final/PhantomReferences. Note that this
+@@ -1358,6 +1382,7 @@ void ZGenerationOld::process_non_strong_references() {
+   // that were just enqueued, which would incorrectly return null
+   // during the resurrection block window, since such referents
+   // are only Finalizable marked.
++  ZOldPreemption::phase("Enqueue References");
+   _reference_processor.enqueue_references();
+ 
+   // Clear old markings claim bits.
+diff --git a/src/hotspot/share/gc/z/zMark.cpp b/src/hotspot/share/gc/z/zMark.cpp
+index 9846f1244..ffea585ee 100644
+--- a/src/hotspot/share/gc/z/zMark.cpp
++++ b/src/hotspot/share/gc/z/zMark.cpp
+@@ -38,6 +38,7 @@
+ #include "gc/z/zHeap.inline.hpp"
+ #include "gc/z/zLock.inline.hpp"
+ #include "gc/z/zMark.inline.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zMarkCache.inline.hpp"
+ #include "gc/z/zMarkContext.inline.hpp"
+ #include "gc/z/zMarkStack.inline.hpp"
+@@ -463,6 +464,7 @@ bool ZMark::rebalance_work(ZMarkContext* context) {
+     flush(Thread::current());
+   }
+ 
++  ZOldPreemption::poll(true);
+   SuspendibleThreadSet::yield();
+ 
+   return ZAbort::should_abort() || _generation->should_worker_resize();
+@@ -480,11 +482,14 @@ bool ZMark::drain(ZMarkContext* context) {
+   while (stacks->pop(&_marking_smr, &_stripes, context->stripe(), &entry)) {
+     mark_and_follow(context, entry);
+ 
+-    if ((processed++ & 31) == 0 && rebalance_work(context)) {
+-      return false;
++    if (++processed == 32) {
++      ZOldPreemption::mark_progress(processed);
++      processed = 0;
++      if (rebalance_work(context)) return false;
+     }
+   }
+ 
++  ZOldPreemption::mark_progress(processed);
+   return true;
+ }
+ 
+@@ -634,6 +639,7 @@ bool ZMark::follow_work(bool partial) {
+   ZMarkContext context(ZMarkStripesMax, stripe, stacks);
+ 
+   for (;;) {
++    ZOldPreemption::poll(true);
+     if (!drain(&context)) {
+       leave();
+       return false;
+@@ -653,6 +659,7 @@ bool ZMark::follow_work(bool partial) {
+       continue;
+     }
+ 
++    if (ZOldPreemption::joined()) ZHeap::heap()->mark_flush(Thread::current());
+     if (try_terminate(&context)) {
+       // Terminate
+       return true;
+@@ -892,7 +899,7 @@ class ZMarkTask : public ZRestartableTask {
+ 
+ public:
+   ZMarkTask(ZMark* mark)
+-    : ZRestartableTask("ZMarkTask"),
++    : ZRestartableTask("ZMarkTask", ZOldTaskMode::cooperative),
+       _mark(mark) {
+     _mark->prepare_work();
+   }
+diff --git a/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp b/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
+index cdd9e7dce..a42cc9922 100644
+--- a/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
++++ b/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
+@@ -23,6 +23,7 @@
+ 
+ #ifndef SHARE_GC_Z_ZMARKTERMINATE_INLINE_HPP
+ #define SHARE_GC_Z_ZMARKTERMINATE_INLINE_HPP
++#include "gc/z/zOldPreemption.hpp"
+ 
+ #include "gc/z/zMarkTerminate.hpp"
+ 
+@@ -67,6 +68,7 @@ inline void ZMarkTerminate::maybe_reduce_stripes(ZMarkStripeSet* stripes, size_t
+ 
+ inline bool ZMarkTerminate::try_terminate(ZMarkStripeSet* stripes, size_t used_nstripes) {
+   SuspendibleThreadSetLeaver sts_leaver;
++  ZOldPreemptionLeaver old_leaver;
+   ZLocker<ZConditionLock> locker(&_lock);
+ 
+   Atomic::store(&_nworking, _nworking - 1);
+diff --git a/src/hotspot/share/gc/z/zOldPreemption.cpp b/src/hotspot/share/gc/z/zOldPreemption.cpp
+new file mode 100644
+index 000000000..22606f055
+--- /dev/null
++++ b/src/hotspot/share/gc/z/zOldPreemption.cpp
+@@ -0,0 +1,167 @@
++/*
++ * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++#include "gc/shared/gcId.hpp"
++#include "gc/shared/suspendibleThreadSet.hpp"
++#include "gc/z/zAbort.inline.hpp"
++#include "gc/z/zGeneration.inline.hpp"
++#include "gc/z/zHeap.inline.hpp"
++#include "gc/z/zLock.inline.hpp"
++#include "gc/z/zOldPreemption.hpp"
++#include "gc/z/z_globals.hpp"
++#include "logging/log.hpp"
++#include "runtime/atomic.hpp"
++#include "runtime/os.hpp"
++#include "runtime/thread.inline.hpp"
++
++ZConditionLock* ZOldPreemption::_lock = nullptr;
++volatile bool ZOldPreemption::_requested = false;
++THREAD_LOCAL bool ZOldPreemption::_joined = false;
++uint ZOldPreemption::_running = 0;
++uint ZOldPreemption::_cycle = 0;
++uint64_t ZOldPreemption::_request = 0;
++uint64_t ZOldPreemption::_pauses = 0;
++volatile uint64_t ZOldPreemption::_mark_entries = 0;
++volatile uint64_t ZOldPreemption::_relocated_pages = 0;
++const char* ZOldPreemption::_phase = "Idle";
++double ZOldPreemption::_requested_at = 0;
++double ZOldPreemption::_parked_at = 0;
++double ZOldPreemption::_paused_seconds = 0;
++void ZOldPreemption::initialize() { _lock = new ZConditionLock(); }
++bool ZOldPreemption::joined() { return _joined; }
++bool ZOldPreemption::requested() { return Atomic::load(&_requested); }
++void ZOldPreemption::join() {
++  if (!ZOldGCPreemption) return;
++  assert(!_joined, "Nested Old participation");
++  ZLocker<ZConditionLock> locker(_lock);
++  while (_requested) _lock->wait();
++  _running++;
++  _joined = true;
++}
++void ZOldPreemption::leave() {
++  if (!ZOldGCPreemption) return;
++  ZLocker<ZConditionLock> locker(_lock);
++  assert(_joined && _running > 0, "Missing Old participation");
++  _joined = false;
++  _running--;
++  if (_running == 0) _lock->notify_all();
++}
++void ZOldPreemption::start() {
++  join();
++  if (!ZOldGCPreemption) return;
++  ZLocker<ZConditionLock> locker(_lock);
++  _cycle = GCId::current();
++  _pauses = 0;
++  _paused_seconds = 0;
++  Atomic::store(&_mark_entries, uint64_t(0));
++  Atomic::store(&_relocated_pages, uint64_t(0));
++  _phase = "Mark Roots";
++  log_debug(gc, preempt)("Old cycle=%u started epoch=%u", _cycle, ZGeneration::old()->seqnum());
++}
++void ZOldPreemption::end() {
++  if (!ZOldGCPreemption) return;
++  poll(false);
++  {
++    ZLocker<ZConditionLock> locker(_lock);
++    log_debug(gc, preempt)("Old cycle=%u %s pauses=" UINT64_FORMAT " paused=%.3fms mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
++                          _cycle, ZAbort::should_abort() ? "shutdown-aborted" : "completed", _pauses,
++                          _paused_seconds * 1000, Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
++    _phase = "Idle";
++  }
++  leave();
++}
++void ZOldPreemption::phase(const char* name, bool poll_before) {
++  if (!ZOldGCPreemption) return;
++  if (poll_before) poll(false);
++  ZLocker<ZConditionLock> locker(_lock);
++  _phase = name;
++  log_debug(gc, preempt)("Old cycle=%u phase=%s", _cycle, _phase);
++}
++void ZOldPreemption::poll(bool in_sts) {
++  if (!_joined || (!requested() && ZOldPreemptionStressDelay == 0)) return;
++  // Publish both generations' stacks. Preserve the bitmap and C++ task frame.
++  if (in_sts) ZHeap::heap()->mark_flush(Thread::current());
++  SuspendibleThreadSetLeaver sts_leaver(in_sts);
++  ZLocker<ZConditionLock> locker(_lock);
++  if (!_requested && ZOldPreemptionStressDelay != 0 && Thread::current()->is_Worker_thread()) {
++    _lock->wait(ZOldPreemptionStressDelay);
++  }
++  if (!_requested) return;
++  _running--;
++  log_trace(gc, preempt)("Old cycle=%u phase=%s parked thread=" PTR_FORMAT " at=%.6f",
++                        _cycle, _phase, p2i(Thread::current()), os::elapsedTime());
++  if (_running == 0) _lock->notify_all();
++  while (_requested) _lock->wait();
++  _running++;
++  log_trace(gc, preempt)("Old cycle=%u phase=%s resumed thread=" PTR_FORMAT " at=%.6f",
++                        _cycle, _phase, p2i(Thread::current()), os::elapsedTime());
++}
++void ZOldPreemption::mark_progress(size_t entries) {
++  if (_joined) Atomic::add(&_mark_entries, uint64_t(entries), memory_order_relaxed);
++}
++void ZOldPreemption::relocate_progress() {
++  if (ZOldGCPreemption) Atomic::add(&_relocated_pages, uint64_t(1), memory_order_relaxed);
++}
++void ZOldPreemption::request() {
++  if (!ZOldGCPreemption) return;
++  {
++    ZLocker<ZConditionLock> locker(_lock);
++    assert(!_requested, "Only the Minor driver requests preemption");
++    Atomic::store(&_requested, true);
++    _request++;
++    _requested_at = os::elapsedTime();
++    log_debug(gc, preempt)("request=" UINT64_FORMAT " Old cycle=%u phase=%s requested at=%.6f running=%u",
++                          _request, _cycle, _phase, _requested_at, _running);
++    _lock->notify_all();
++    while (_running != 0) _lock->wait();
++  }
++  // Outside the coordinator lock. In-flight pages must finish; queued
++  // retainers must still be serviced to avoid blocking a safepoint or Young.
++  ZGeneration::old()->synchronize_relocation();
++  {
++    ZLocker<ZConditionLock> locker(_lock);
++    _parked_at = os::elapsedTime();
++    _pauses++;
++    log_debug(gc, preempt)("request=" UINT64_FORMAT " Old cycle=%u phase=%s all-parked at=%.6f wait=%.3fms epoch=%u mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
++                          _request, _cycle, _phase, _parked_at, (_parked_at - _requested_at) * 1000,
++                          ZGeneration::old()->seqnum(), Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
++  }
++}
++void ZOldPreemption::resume() {
++  if (!ZOldGCPreemption) return;
++  ZGeneration::old()->desynchronize_relocation();
++  ZLocker<ZConditionLock> locker(_lock);
++  const double duration = os::elapsedTime() - _parked_at;
++  _paused_seconds += duration;
++  log_debug(gc, preempt)("request=" UINT64_FORMAT " Old cycle=%u phase=%s resume pause=%.3fms epoch=%u mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
++                        _request, _cycle, _phase, duration * 1000, ZGeneration::old()->seqnum(),
++                        Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
++  Atomic::store(&_requested, false);
++  _lock->notify_all();
++}
++void ZOldPreemption::minor_start() {
++  if (ZOldGCPreemption) log_debug(gc, preempt)("request=" UINT64_FORMAT " Minor start", _request);
++}
++void ZOldPreemption::minor_end() {
++  if (ZOldGCPreemption) log_debug(gc, preempt)("request=" UINT64_FORMAT " Minor end", _request);
++}
+diff --git a/src/hotspot/share/gc/z/zOldPreemption.hpp b/src/hotspot/share/gc/z/zOldPreemption.hpp
+new file mode 100644
+index 000000000..8fcf5f03b
+--- /dev/null
++++ b/src/hotspot/share/gc/z/zOldPreemption.hpp
+@@ -0,0 +1,86 @@
++/*
++ * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++#ifndef SHARE_GC_Z_ZOLDPREEMPTION_HPP
++#define SHARE_GC_Z_ZOLDPREEMPTION_HPP
++#include "gc/z/zLock.hpp"
++#include "memory/allocation.hpp"
++#include "utilities/globalDefinitions.hpp"
++
++// Old-local participation, independent of STS. Only audited tasks participate.
++class ZOldPreemption : public AllStatic {
++  static ZConditionLock* _lock;
++  static volatile bool _requested;
++  static THREAD_LOCAL bool _joined;
++  static uint _running;
++  static uint _cycle;
++  static uint64_t _request;
++  static uint64_t _pauses;
++  static volatile uint64_t _mark_entries;
++  static volatile uint64_t _relocated_pages;
++  static const char* _phase;
++  static double _requested_at;
++  static double _parked_at;
++  static double _paused_seconds;
++public:
++  static void initialize();
++  static bool joined();
++  static bool requested();
++  static void join();
++  static void leave();
++  static void start();
++  static void end();
++  static void phase(const char* name, bool poll = true);
++  static void poll(bool in_sts);
++  static void mark_progress(size_t entries);
++  static void relocate_progress();
++  static void request();
++  static void resume();
++  static void minor_start();
++  static void minor_end();
++};
++class ZOldPreemptionJoiner : public StackObj {
++  bool _active;
++public:
++  ZOldPreemptionJoiner(bool active) : _active(active) { if (_active) ZOldPreemption::join(); }
++  ~ZOldPreemptionJoiner() { if (_active) ZOldPreemption::leave(); }
++};
++// Destroy after releasing any inner lock, before rejoining an outer STS leaver.
++class ZOldPreemptionLeaver : public StackObj {
++  bool _active;
++public:
++  ZOldPreemptionLeaver() : _active(ZOldPreemption::joined()) { if (_active) ZOldPreemption::leave(); }
++  ~ZOldPreemptionLeaver() { if (_active) ZOldPreemption::join(); }
++};
++class ZOldPreemptionCycle : public StackObj {
++public:
++  ZOldPreemptionCycle() { ZOldPreemption::start(); }
++  ~ZOldPreemptionCycle() { ZOldPreemption::end(); }
++};
++// Construct BEFORE DriverLocker, so resume follows driver unlock.
++class ZOldPreemptionRequest : public StackObj {
++public:
++  ZOldPreemptionRequest() { ZOldPreemption::request(); }
++  ~ZOldPreemptionRequest() { ZOldPreemption::resume(); }
++};
++#endif // SHARE_GC_Z_ZOLDPREEMPTION_HPP
+diff --git a/src/hotspot/share/gc/z/zReferenceProcessor.cpp b/src/hotspot/share/gc/z/zReferenceProcessor.cpp
+index 1af4deaec..1ea2ee311 100644
+--- a/src/hotspot/share/gc/z/zReferenceProcessor.cpp
++++ b/src/hotspot/share/gc/z/zReferenceProcessor.cpp
+@@ -31,6 +31,7 @@
+ #include "gc/z/zReferenceProcessor.hpp"
+ #include "gc/z/zStat.hpp"
+ #include "gc/z/zTask.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zTracer.inline.hpp"
+ #include "gc/z/zValue.inline.hpp"
+ #include "memory/universe.hpp"
+@@ -309,6 +310,7 @@ void ZReferenceProcessor::process_worker_discovered_list(zaddress discovered_lis
+     }
+ 
+     reference = next;
++    ZOldPreemption::poll(true);
+     SuspendibleThreadSet::yield();
+   }
+ 
+@@ -432,7 +434,7 @@ class ZReferenceProcessorTask : public ZTask {
+ 
+ public:
+   ZReferenceProcessorTask(ZReferenceProcessor* reference_processor)
+-    : ZTask("ZReferenceProcessorTask"),
++    : ZTask("ZReferenceProcessorTask", ZOldTaskMode::cooperative),
+       _reference_processor(reference_processor) {}
+ 
+   virtual void work() {
+@@ -476,6 +478,7 @@ void ZReferenceProcessor::verify_pending_references() {
+       assert(ZPointer::is_marked_any_old(ZBarrier::load_atomic(referent_addr)), "invariant");
+     }
+ 
++    ZOldPreemption::poll(true);
+     SuspendibleThreadSet::yield();
+   }
+ #endif
+diff --git a/src/hotspot/share/gc/z/zRelocate.cpp b/src/hotspot/share/gc/z/zRelocate.cpp
+index df2dd8a01..e16fdc737 100644
+--- a/src/hotspot/share/gc/z/zRelocate.cpp
++++ b/src/hotspot/share/gc/z/zRelocate.cpp
+@@ -36,6 +36,7 @@
+ #include "gc/z/zPage.inline.hpp"
+ #include "gc/z/zPageAge.hpp"
+ #include "gc/z/zRelocate.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zRelocationSet.inline.hpp"
+ #include "gc/z/zRootsIterator.hpp"
+ #include "gc/z/zStackWatermark.hpp"
+@@ -52,12 +53,13 @@
+ static const ZStatCriticalPhase ZCriticalPhaseRelocationStall("Relocation Stall");
+ static const ZStatSubPhase ZSubPhaseConcurrentRelocateRememberedSetFlipPromotedYoung("Concurrent Relocate Remset FP", ZGenerationId::young);
+ 
+-ZRelocateQueue::ZRelocateQueue()
++ZRelocateQueue::ZRelocateQueue(bool is_old)
+   : _lock(),
+     _queue(),
+     _nworkers(0),
+     _nsynchronized(0),
+-    _synchronize(false),
++    _synchronize(0),
++    _is_old(is_old),
+     _is_active(false),
+     _needs_attention(0) {}
+ 
+@@ -116,7 +118,7 @@ void ZRelocateQueue::leave() {
+ 
+   assert(_nsynchronized <= _nworkers, "_nsynchronized: %u _nworkers: %u", _nsynchronized, _nworkers);
+ 
+-  log_debug(gc, reloc)("Leaving workers: left: %u _synchronize: %d _nsynchronized: %u", _nworkers, _synchronize, _nsynchronized);
++  log_debug(gc, reloc)("Leaving workers: left: %u _synchronize: %u _nsynchronized: %u", _nworkers, _synchronize, _nsynchronized);
+ 
+   // Prune done forwardings
+   const bool forwardings_done = prune();
+@@ -206,6 +208,9 @@ class ZRelocateQueueSynchronizeThread {
+ 
+ void ZRelocateQueue::synchronize_thread() {
+   _nsynchronized++;
++  if (_is_old && ZOldPreemption::requested()) {
++    log_trace(gc, preempt)("Old relocation parked worker=%u", WorkerThread::worker_id());
++  }
+ 
+   log_debug(gc, reloc)("Synchronize worker _nsynchronized %u", _nsynchronized);
+ 
+@@ -218,6 +223,9 @@ void ZRelocateQueue::synchronize_thread() {
+ 
+ void ZRelocateQueue::desynchronize_thread() {
+   _nsynchronized--;
++  if (_is_old && ZOldPreemption::requested()) {
++    log_trace(gc, preempt)("Old relocation leaving park worker=%u (queued retainer)", WorkerThread::worker_id());
++  }
+ 
+   log_debug(gc, reloc)("Desynchronize worker _nsynchronized %u", _nsynchronized);
+ 
+@@ -225,6 +233,10 @@ void ZRelocateQueue::desynchronize_thread() {
+ }
+ 
+ ZForwarding* ZRelocateQueue::synchronize_poll() {
++  if (_is_old && ZOldPreemptionStressDelay != 0) {
++    ZLocker<ZConditionLock> locker(&_lock);
++    if (_synchronize == 0) _lock.wait(ZOldPreemptionStressDelay);
++  }
+   // Fast path avoids locking
+   if (!needs_attention()) {
+     return nullptr;
+@@ -279,9 +291,8 @@ void ZRelocateQueue::clear() {
+ 
+ void ZRelocateQueue::synchronize() {
+   ZLocker<ZConditionLock> locker(&_lock);
+-  _synchronize = true;
+-
+-  inc_needs_attention();
++  if (_synchronize++ == 0) inc_needs_attention();
++  _lock.notify_all();
+ 
+   log_debug(gc, reloc)("Synchronize all workers 1 _nworkers: %u _nsynchronized: %u", _nworkers, _nsynchronized);
+ 
+@@ -293,7 +304,8 @@ void ZRelocateQueue::synchronize() {
+ 
+ void ZRelocateQueue::desynchronize() {
+   ZLocker<ZConditionLock> locker(&_lock);
+-  _synchronize = false;
++  assert(_synchronize > 0, "Unbalanced relocation hold");
++  if (--_synchronize != 0) return;
+ 
+   log_debug(gc, reloc)("Desynchronize all workers _nworkers: %u _nsynchronized: %u", _nworkers, _nsynchronized);
+ 
+@@ -306,7 +318,7 @@ void ZRelocateQueue::desynchronize() {
+ 
+ ZRelocate::ZRelocate(ZGeneration* generation)
+   : _generation(generation),
+-    _queue() {}
++    _queue(generation->is_old()) {}
+ 
+ ZWorkers* ZRelocate::workers() const {
+   return _generation->workers();
+@@ -1064,7 +1076,7 @@ class ZRelocateTask : public ZRestartableTask {
+ 
+ public:
+   ZRelocateTask(ZRelocationSet* relocation_set, ZRelocateQueue* queue)
+-    : ZRestartableTask("ZRelocateTask"),
++    : ZRestartableTask("ZRelocateTask", ZOldTaskMode::relocation),
+       _iter(relocation_set),
+       _generation(relocation_set->generation()),
+       _queue(queue),
+@@ -1098,6 +1110,7 @@ class ZRelocateTask : public ZRestartableTask {
+       // After the mark_done call a safepointing could be completed and a
+       // new GC phase could be entered.
+       forwarding->mark_done();
++      if (_generation->is_old()) ZOldPreemption::relocate_progress();
+     };
+ 
+     const auto claim_and_do_forwarding = [&](ZForwarding* forwarding) {
+diff --git a/src/hotspot/share/gc/z/zRelocate.hpp b/src/hotspot/share/gc/z/zRelocate.hpp
+index 400fc61b0..4e82d6317 100644
+--- a/src/hotspot/share/gc/z/zRelocate.hpp
++++ b/src/hotspot/share/gc/z/zRelocate.hpp
+@@ -40,7 +40,8 @@ class ZRelocateQueue {
+   ZArray<ZForwarding*> _queue;
+   uint                 _nworkers;
+   uint                 _nsynchronized;
+-  bool                 _synchronize;
++  uint                 _synchronize; // Nested safepoint / preemption holds
++  const bool           _is_old;
+   volatile bool        _is_active;
+   volatile int         _needs_attention;
+ 
+@@ -52,7 +53,7 @@ class ZRelocateQueue {
+   ZForwarding* prune_and_claim();
+ 
+ public:
+-  ZRelocateQueue();
++  ZRelocateQueue(bool is_old);
+ 
+   void activate(uint nworkers);
+   void deactivate();
+diff --git a/src/hotspot/share/gc/z/zRelocationSet.cpp b/src/hotspot/share/gc/z/zRelocationSet.cpp
+index 8cc7bceb8..5e4dbba8c 100644
+--- a/src/hotspot/share/gc/z/zRelocationSet.cpp
++++ b/src/hotspot/share/gc/z/zRelocationSet.cpp
+@@ -32,6 +32,7 @@
+ #include "gc/z/zRelocationSetSelector.inline.hpp"
+ #include "gc/z/zStat.hpp"
+ #include "gc/z/zTask.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zWorkers.hpp"
+ #include "runtime/atomic.hpp"
+ #include "utilities/debug.hpp"
+@@ -80,7 +81,7 @@ class ZRelocationSetInstallTask : public ZTask {
+ 
+ public:
+   ZRelocationSetInstallTask(ZForwardingAllocator* allocator, const ZRelocationSetSelector* selector)
+-    : ZTask("ZRelocationSetInstallTask"),
++    : ZTask("ZRelocationSetInstallTask", ZOldTaskMode::cooperative),
+       _allocator(allocator),
+       _forwardings(nullptr),
+       _nforwardings((size_t)selector->selected_small()->length() + (size_t)selector->selected_medium()->length()),
+@@ -114,6 +115,7 @@ class ZRelocationSetInstallTask : public ZTask {
+       ZForwarding* const forwarding = ZForwarding::alloc(_allocator, page, to_age(page));
+       install_small(forwarding, (size_t)_medium->length() + page_index);
+ 
++      ZOldPreemption::poll(true);
+       SuspendibleThreadSet::yield();
+     }
+ 
+@@ -123,6 +125,7 @@ class ZRelocationSetInstallTask : public ZTask {
+       ZForwarding* const forwarding = ZForwarding::alloc(_allocator, page, to_age(page));
+       install_medium(forwarding, page_index);
+ 
++      ZOldPreemption::poll(true);
+       SuspendibleThreadSet::yield();
+     }
+   }
+@@ -183,6 +186,7 @@ void ZRelocationSet::reset(ZPageAllocator* page_allocator) {
+   ZRelocationSetIterator iter(this);
+   for (ZForwarding* forwarding; iter.next(&forwarding);) {
+     forwarding->~ZForwarding();
++    if (_generation->is_old()) ZOldPreemption::poll(false);
+   }
+ 
+   _nforwardings = 0;
+diff --git a/src/hotspot/share/gc/z/zTask.cpp b/src/hotspot/share/gc/z/zTask.cpp
+index 208a20c19..d662e7494 100644
+--- a/src/hotspot/share/gc/z/zTask.cpp
++++ b/src/hotspot/share/gc/z/zTask.cpp
+@@ -31,8 +31,8 @@ void ZTask::Task::work(uint worker_id) {
+   _task->work();
+ }
+ 
+-ZTask::ZTask(const char* name)
+-  : _worker_task(this, name) {}
++ZTask::ZTask(const char* name, ZOldTaskMode old_mode)
++  : _worker_task(this, name), _old_mode(old_mode) {}
+ 
+ const char* ZTask::name() const {
+   return _worker_task.name();
+@@ -42,7 +42,7 @@ WorkerTask* ZTask::worker_task() {
+   return &_worker_task;
+ }
+ 
+-ZRestartableTask::ZRestartableTask(const char* name)
+-  : ZTask(name) {}
++ZRestartableTask::ZRestartableTask(const char* name, ZOldTaskMode old_mode)
++  : ZTask(name, old_mode) {}
+ 
+ void ZRestartableTask::resize_workers(uint nworkers) {}
+diff --git a/src/hotspot/share/gc/z/zTask.hpp b/src/hotspot/share/gc/z/zTask.hpp
+index 37733f887..5ea9b3da4 100644
+--- a/src/hotspot/share/gc/z/zTask.hpp
++++ b/src/hotspot/share/gc/z/zTask.hpp
+@@ -27,6 +27,8 @@
+ #include "gc/shared/workerThread.hpp"
+ #include "memory/allocation.hpp"
+ 
++enum class ZOldTaskMode { serial, cooperative, relocation };
++
+ class ZTask : public StackObj {
+ private:
+   class Task : public WorkerTask {
+@@ -40,9 +42,11 @@ class ZTask : public StackObj {
+   };
+ 
+   Task _worker_task;
++  const ZOldTaskMode _old_mode;
+ 
+ public:
+-  ZTask(const char* name);
++  ZTask(const char* name, ZOldTaskMode old_mode = ZOldTaskMode::serial);
++  ZOldTaskMode old_mode() const { return _old_mode; }
+ 
+   const char* name() const;
+   WorkerTask* worker_task();
+@@ -52,7 +56,7 @@ class ZTask : public StackObj {
+ 
+ class ZRestartableTask : public ZTask {
+ public:
+-  ZRestartableTask(const char* name);
++  ZRestartableTask(const char* name, ZOldTaskMode old_mode = ZOldTaskMode::serial);
+   virtual void resize_workers(uint nworkers);
+ };
+ 
+diff --git a/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp b/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
+index 7373f451c..19b1cff43 100644
+--- a/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
++++ b/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
+@@ -27,6 +27,7 @@
+ #include "gc/z/zHeap.inline.hpp"
+ #include "gc/z/zRootsIterator.hpp"
+ #include "gc/z/zTask.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zWeakRootsProcessor.hpp"
+ #include "gc/z/zWorkers.hpp"
+ #include "memory/iterator.hpp"
+@@ -37,6 +38,7 @@ class ZPhantomCleanOopClosure : public OopClosure {
+ public:
+   virtual void do_oop(oop* p) {
+     ZBarrier::clean_barrier_on_phantom_oop_field((zpointer*)p);
++    ZOldPreemption::poll(true);
+     SuspendibleThreadSet::yield();
+   }
+ 
+@@ -54,7 +56,7 @@ class ZProcessWeakRootsTask : public ZTask {
+ 
+ public:
+   ZProcessWeakRootsTask()
+-    : ZTask("ZProcessWeakRootsTask"),
++    : ZTask("ZProcessWeakRootsTask", ZOldTaskMode::cooperative),
+       _roots_weak_colored(ZGenerationIdOptional::old) {}
+ 
+   ~ZProcessWeakRootsTask() {
+diff --git a/src/hotspot/share/gc/z/zWorkers.cpp b/src/hotspot/share/gc/z/zWorkers.cpp
+index 1e7144a0c..34074a26e 100644
+--- a/src/hotspot/share/gc/z/zWorkers.cpp
++++ b/src/hotspot/share/gc/z/zWorkers.cpp
+@@ -28,6 +28,7 @@
+ #include "gc/z/zStat.hpp"
+ #include "gc/z/zTask.hpp"
+ #include "gc/z/zWorkers.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "runtime/java.hpp"
+ 
+ static const char* workers_name(ZGenerationId id) {
+@@ -45,6 +46,7 @@ static uint max_nworkers(ZGenerationId id) {
+ ZWorkers::ZWorkers(ZGenerationId id, ZStatWorkers* stats)
+   : _workers(workers_name(id),
+              max_nworkers(id)),
++    _id(id),
+     _generation_name(generation_name(id)),
+     _resize_lock(),
+     _requested_nworkers(0),
+@@ -89,6 +91,15 @@ void ZWorkers::set_inactive() {
+   _is_active = false;
+ }
+ 
++class ZOldPreemptibleTask : public WorkerTask {
++  ZTask* const _task;
++public:
++  ZOldPreemptibleTask(ZTask* task) : WorkerTask(task->name()), _task(task) {}
++  void work(uint worker_id) override {
++    ZOldPreemptionJoiner joiner(_task->old_mode() == ZOldTaskMode::cooperative);
++    _task->worker_task()->work(worker_id);
++  }
++};
+ void ZWorkers::run(ZTask* task) {
+   log_debug(gc, task)("Executing %s using %s with %u workers", task->name(), _workers.name(), active_workers());
+ 
+@@ -97,7 +108,14 @@ void ZWorkers::run(ZTask* task) {
+     _stats->at_start(active_workers());
+   }
+ 
+-  _workers.run_task(task->worker_task());
++  if (_id == ZGenerationId::old && ZOldPreemption::joined() && task->old_mode() != ZOldTaskMode::serial) {
++    if (task->old_mode() == ZOldTaskMode::relocation) ZOldPreemption::phase("Relocate", false);
++    ZOldPreemptibleTask wrapper(task);
++    ZOldPreemptionLeaver leaver;
++    _workers.run_task(&wrapper);
++  } else {
++    _workers.run_task(task->worker_task());
++  }
+ 
+   {
+     ZLocker<ZLock> locker(&_resize_lock);
+diff --git a/src/hotspot/share/gc/z/zWorkers.hpp b/src/hotspot/share/gc/z/zWorkers.hpp
+index 8d1f41525..7b98acfb4 100644
+--- a/src/hotspot/share/gc/z/zWorkers.hpp
++++ b/src/hotspot/share/gc/z/zWorkers.hpp
+@@ -38,6 +38,7 @@ class ZTask;
+ class ZWorkers {
+ private:
+   WorkerThreads       _workers;
++  const ZGenerationId _id;
+   const char* const   _generation_name;
+   ZLock               _resize_lock;
+   volatile uint       _requested_nworkers;
+diff --git a/src/hotspot/share/gc/z/z_globals.hpp b/src/hotspot/share/gc/z/z_globals.hpp
+index 4e5d725a5..53f8f207d 100644
+--- a/src/hotspot/share/gc/z/z_globals.hpp
++++ b/src/hotspot/share/gc/z/z_globals.hpp
+@@ -75,6 +75,12 @@
+   product(bool, ZStressRelocateInPlace, false, DIAGNOSTIC,                  \
+           "Always relocate pages in-place")                                 \
+                                                                             \
++  product(bool, ZOldGCPreemption, true, DIAGNOSTIC,                          \
++          "Pause Old work during Minor collections")                        \
++                                                                            \
++  develop(uintx, ZOldPreemptionStressDelay, 0,                                \
++          "Interruptible delay in milliseconds at Old preemption polls")    \
++                                                                            \
+   product(bool, ZVerifyRoots, trueInDebug, DIAGNOSTIC,                      \
+           "Verify roots")                                                   \
+                                                                             \
+diff --git a/test/hotspot/jtreg/gc/z/TestOldPreemption.java b/test/hotspot/jtreg/gc/z/TestOldPreemption.java
+new file mode 100644
+index 000000000..8b9dcac12
+--- /dev/null
++++ b/test/hotspot/jtreg/gc/z/TestOldPreemption.java
+@@ -0,0 +1,199 @@
++/*
++ * Copyright (c) 2026, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++/*
++ * @test
++ * @summary Preserve a single Old cycle across repeated Minor preemption
++ * @requires vm.gc.Z & vm.debug
++ * @library /test/lib
++ * @build jdk.test.whitebox.WhiteBox
++ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
++ * @run driver/timeout=360 gc.z.TestOldPreemption
++ */
++package gc.z;
++
++import java.lang.ref.*;
++import java.nio.file.*;
++import java.util.*;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.regex.*;
++import jdk.test.lib.process.ProcessTools;
++import jdk.test.lib.process.OutputAnalyzer;
++import jdk.test.whitebox.WhiteBox;
++
++public class TestOldPreemption {
++    static volatile Object sink;
++    static volatile boolean running = true;
++    static final AtomicReference<Throwable> failure = new AtomicReference<>();
++    static class Node {
++        final int id;
++        final byte[] data = new byte[256];
++        volatile Object edge;
++        Node(int id) { this.id = id; data[17] = (byte) id; }
++        void check() {
++            if (data[17] != (byte) id) throw new AssertionError("Corrupt node " + id);
++        }
++    }
++    static void check(boolean condition, String message) {
++        if (!condition) throw new AssertionError(message);
++    }
++    public static void main(String[] args) throws Exception {
++        if (args.length != 0) { workload(); return; }
++        Path log = Path.of("old-preemption-stress.log").toAbsolutePath();
++        ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(
++            "-XX:+UseZGC", "-Xms256m", "-Xmx2g", "-XX:+UnlockDiagnosticVMOptions",
++            "-XX:+WhiteBoxAPI", "-Xbootclasspath/a:.",
++            "-XX:ZOldGCThreads=2", "-XX:ZYoungGCThreads=2",
++            "-Xlog:gc*,gc+stats=off,gc+preempt=debug:file=" + log + ":uptimemillis,tid,level,tags",
++            TestOldPreemption.class.getName(), "child");
++        new OutputAnalyzer(pb.start()).shouldHaveExitValue(0).shouldContain("WORKLOAD completed");
++        audit(Files.readAllLines(log));
++    }
++    static void workload() throws Exception {
++        WhiteBox wb = WhiteBox.getWhiteBox();
++        Node[] live = new Node[48000];
++        Node[] dying = new Node[4096];
++        ReferenceQueue<Node> queue = new ReferenceQueue<>();
++        List<Reference<Node>> refs = new ArrayList<>();
++        List<WeakReference<Node>> liveRefs = new ArrayList<>();
++        for (int i = 0; i < live.length; i++) live[i] = new Node(i);
++        for (int i = 0; i < 512; i++) liveRefs.add(new WeakReference<>(live[2 * i + 1]));
++        for (int i = 0; i < dying.length; i++) {
++            dying[i] = new Node(i);
++            refs.add(new WeakReference<>(dying[i], queue));
++            refs.add(new PhantomReference<>(dying[i], queue));
++        }
++        wb.fullGC();
++        for (int i = 0; i < live.length; i += 2) live[i] = null;
++        Arrays.fill(dying, null);
++        wb.setUintxVMFlag("ZOldPreemptionStressDelay", 1L);
++        Thread churn = new Thread(() -> {
++            try {
++                long count = 0;
++                while (running) {
++                    int i = 2 * (int) (count % (live.length / 2)) + 1;
++                    live[i].check();
++                    live[i].edge = new byte[2048];
++                    sink = new byte[4096];
++                    // Keep generating Young garbage throughout reference processing.
++                    // An allocation-stalled producer cannot submit the next Minor.
++                    count++;
++                    Thread.sleep(1);
++                }
++            } catch (Throwable t) { failure.compareAndSet(null, t); }
++        }, "young-garbage");
++        churn.setDaemon(true);
++        churn.start();
++        long started = System.nanoTime();
++        int minors = 0;
++        for (int round = 0; round < 3; round++) {
++            Thread major = new Thread(() -> {
++                try { wb.fullGC(); }
++                catch (Throwable t) { failure.compareAndSet(null, t); }
++            }, "major-request");
++            major.setDaemon(true);
++            major.start();
++            Thread.sleep(10);
++            long deadline = System.nanoTime() + 90_000_000_000L;
++            while (major.isAlive()) {
++                check(System.nanoTime() < deadline, "Major did not finish round " + round);
++                wb.youngGC();
++                minors++;
++                // Repeated forced Minors also consume promotion/page headroom.
++                // Leave enough space/time to reach the reference phase with an
++                // unstalled requester; allocation-stall stress is a separate run.
++                Thread.sleep(20);
++            }
++            major.join();
++            for (int i = 1; i < live.length; i += 2) live[i].check();
++            for (WeakReference<Node> ref : liveRefs) {
++                check(ref.get() != null, "Lost a strongly reachable weak referent");
++                ref.get().check();
++            }
++        }
++        running = false;
++        churn.join();
++        wb.setUintxVMFlag("ZOldPreemptionStressDelay", 0L);
++        if (failure.get() != null) throw new AssertionError("Worker failed", failure.get());
++        check(minors >= 32, "Insufficient Minor requests: " + minors);
++        wb.fullGC();
++        int enqueued = 0;
++        long deadline = System.nanoTime() + 5_000_000_000L;
++        while (enqueued < refs.size() && System.nanoTime() < deadline) {
++            if (queue.remove(20) != null) enqueued++;
++        }
++        check(enqueued == refs.size(), "References not enqueued: " + enqueued + "/" + refs.size());
++        Runtime rt = Runtime.getRuntime();
++        long before = rt.totalMemory() - rt.freeMemory();
++        liveRefs.clear();
++        Arrays.fill(live, null);
++        sink = null;
++        wb.fullGC();
++        long after = rt.totalMemory() - rt.freeMemory();
++        check(after < before, "Old garbage was not reclaimed: " + before + " -> " + after);
++        Reference.reachabilityFence(refs);
++        System.out.println("WORKLOAD completed minors=" + minors + " elapsed_ms=" +
++            (System.nanoTime() - started) / 1_000_000 + " heap_before=" + before + " heap_after=" + after);
++    }
++    record State(long cycle, String phase, long epoch, long marked, long relocated) {}
++    static void audit(List<String> lines) {
++        Pattern state = Pattern.compile("request=(\\d+) Old cycle=(\\d+) phase=(.*?) (all-parked|resume).*?epoch=(\\d+) mark_entries=(\\d+) relocated_pages=(\\d+)");
++        Pattern completed = Pattern.compile("Old cycle=(\\d+) completed");
++        Map<Long, State> parked = new HashMap<>();
++        Map<Long, State> latest = new HashMap<>();
++        Map<Long, Integer> counts = new HashMap<>();
++        Set<Long> finished = new HashSet<>();
++        Set<String> phases = new HashSet<>();
++        for (String line : lines) {
++            Matcher c = completed.matcher(line);
++            if (c.find()) finished.add(Long.parseLong(c.group(1)));
++            Matcher m = state.matcher(line);
++            if (!m.find()) continue;
++            long request = Long.parseLong(m.group(1));
++            State s = new State(Long.parseLong(m.group(2)), m.group(3),
++                Long.parseLong(m.group(5)), Long.parseLong(m.group(6)), Long.parseLong(m.group(7)));
++            if (m.group(4).equals("all-parked")) {
++                check(parked.put(request, s) == null, "Duplicate park " + request);
++                continue;
++            }
++            State p = parked.remove(request);
++            check(p != null, "Resume without park " + request);
++            if (p.phase.equals("Idle")) continue;
++            check(s.cycle == p.cycle && s.epoch == p.epoch, "Cycle/epoch changed during pause " + request);
++            check(s.marked == p.marked, "Mark advanced while parked " + request);
++            check(s.relocated >= p.relocated, "Relocation went backwards during pause " + request);
++            State prev = latest.put(s.cycle, s);
++            if (prev != null) check(s.marked >= prev.marked && s.relocated >= prev.relocated,
++                "Progress went backwards in cycle " + s.cycle);
++            counts.merge(s.cycle, 1, Integer::sum);
++            phases.add(s.phase);
++        }
++        check(parked.isEmpty(), "Unreleased holds " + parked.keySet());
++        check(finished.containsAll(counts.keySet()), "Preempted cycle did not finish " + counts);
++        check(counts.values().stream().anyMatch(n -> n >= 32), "No repeatedly preempted Major " + counts);
++        check(phases.contains("Mark"), "Mark preemption untested " + phases);
++        check(phases.contains("Process Non-Strong"), "Reference preemption untested " + phases);
++        check(phases.contains("Relocate"), "Relocation preemption untested " + phases);
++        System.out.println("PREEMPTION verified pauses=" + counts + " phases=" + phases);
++    }
++}
