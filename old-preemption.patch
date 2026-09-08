@@ -1409,7 +1409,7 @@ index 80e10dc..71ec311 100644
 +
 +ZPage* ZPage::reset(ZPageAge age, uint32_t young_age) {
    _age = age;
-+  Atomic::store(&_young_age, age == ZPageAge::old ? 0u : young_age, memory_order_relaxed);
++  Atomic::store(&_young_age, age == ZPageAge::old ? 0u : young_age);
  
    _generation_id = age == ZPageAge::old
        ? ZGenerationId::old
@@ -1419,13 +1419,13 @@ index 80e10dc..71ec311 100644
  
 +void ZPage::set_young_age(uint32_t young_age) {
 +  assert(is_young(), "Only young pages have a young age");
-+  Atomic::store(&_young_age, young_age, memory_order_relaxed);
++  Atomic::store(&_young_age, young_age);
 +}
 +
 +void ZPage::merge_young_age(uint32_t young_age) {
 +  assert(is_young(), "Only young pages have a young age");
 +
-+  uint32_t current = Atomic::load(&_young_age, memory_order_relaxed);
++  uint32_t current = Atomic::load(&_young_age);
 +  while (young_age < current) {
 +    const uint32_t observed = Atomic::cmpxchg(&_young_age, current, young_age, memory_order_relaxed);
 +    if (observed == current) {
@@ -1476,7 +1476,7 @@ index f6c2029..06dd58f 100644
  }
  
 +inline uint32_t ZPage::young_age() const {
-+  return Atomic::load(&_young_age, memory_order_relaxed);
++  return Atomic::load(&_young_age);
 +}
 +
  inline uint32_t ZPage::seqnum() const {
