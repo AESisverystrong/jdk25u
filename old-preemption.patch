@@ -674,8 +674,109 @@ index 00e91c2..623b5f9 100644
 +  ZOldPreemptionLeaver preemption_leaver;
    ConcurrentGCBreakpoints::at("AFTER CONCURRENT REFERENCE PROCESSING STARTED");
  }
+diff --git a/src/hotspot/share/gc/z/zDirector.cpp b/src/hotspot/share/gc/z/zDirector.cpp
+index f1256ee..ce07b04 100644
+--- a/src/hotspot/share/gc/z/zDirector.cpp
++++ b/src/hotspot/share/gc/z/zDirector.cpp
+@@ -73,7 +73,8 @@ struct ZDirectorStats {
+ 
+ ZDirector::ZDirector()
+   : _monitor(),
+-    _stopped(false) {
++    _stopped(false),
++    _post_minor_soft_max_exceeded(false) {
+   _director = this;
+   set_name("ZDirector");
+   create_and_start();
+@@ -640,11 +641,19 @@ static GCCause::Cause make_minor_gc_decision(const ZDirectorStats& stats) {
+   return GCCause::_no_gc;
+ }
+ 
+-static GCCause::Cause make_major_gc_decision(const ZDirectorStats& stats) {
++static bool rule_major_post_minor_soft_max(bool post_minor_soft_max_exceeded) {
++  return post_minor_soft_max_exceeded;
++}
++
++static GCCause::Cause make_major_gc_decision(const ZDirectorStats& stats, bool post_minor_soft_max_exceeded) {
+   if (ZDriver::major()->is_busy()) {
+     return GCCause::_no_gc;
+   }
+ 
++  if (rule_major_post_minor_soft_max(post_minor_soft_max_exceeded)) {
++    return GCCause::_z_high_usage;
++  }
++
+   if (rule_major_timer(stats)) {
+     return GCCause::_z_timer;
+   }
+@@ -829,9 +838,9 @@ static void start_minor_gc(const ZDirectorStats& stats, GCCause::Cause cause) {
+   ZDriver::minor()->collect(request);
+ }
+ 
+-static bool start_gc(const ZDirectorStats& stats) {
++static bool start_gc(const ZDirectorStats& stats, bool post_minor_soft_max_exceeded) {
+   // Try start major collections first as they include a minor collection
+-  const GCCause::Cause major_cause = make_major_gc_decision(stats);
++  const GCCause::Cause major_cause = make_major_gc_decision(stats, post_minor_soft_max_exceeded);
+   if (major_cause != GCCause::_no_gc) {
+     start_major_gc(stats, major_cause);
+     return true;
+@@ -857,6 +866,19 @@ void ZDirector::evaluate_rules() {
+   _director->_monitor.notify();
+ }
+ 
++void ZDirector::minor_completed(bool soft_max_exceeded) {
++  ZLocker<ZConditionLock> locker(&_director->_monitor);
++  _director->_post_minor_soft_max_exceeded |= soft_max_exceeded;
++  _director->_monitor.notify();
++}
++
++bool ZDirector::consume_post_minor_soft_max_exceeded() {
++  ZLocker<ZConditionLock> locker(&_monitor);
++  const bool exceeded = _post_minor_soft_max_exceeded;
++  _post_minor_soft_max_exceeded = false;
++  return exceeded;
++}
++
+ bool ZDirector::wait_for_tick() {
+   const uint64_t interval_ms = MILLIUNITS / DecisionHz;
+ 
+@@ -928,8 +950,9 @@ static ZDirectorStats sample_stats() {
+ void ZDirector::run_thread() {
+   // Main loop
+   while (wait_for_tick()) {
++    const bool post_minor_soft_max_exceeded = consume_post_minor_soft_max_exceeded();
+     ZDirectorStats stats = sample_stats();
+-    if (!start_gc(stats)) {
++    if (!start_gc(stats, post_minor_soft_max_exceeded)) {
+       adjust_gc(stats);
+     }
+   }
+diff --git a/src/hotspot/share/gc/z/zDirector.hpp b/src/hotspot/share/gc/z/zDirector.hpp
+index 624d356..d5bd054 100644
+--- a/src/hotspot/share/gc/z/zDirector.hpp
++++ b/src/hotspot/share/gc/z/zDirector.hpp
+@@ -34,8 +34,10 @@ private:
+ 
+   ZConditionLock _monitor;
+   bool           _stopped;
++  bool           _post_minor_soft_max_exceeded;
+ 
+   bool wait_for_tick();
++  bool consume_post_minor_soft_max_exceeded();
+ 
+ protected:
+   virtual void run_thread();
+@@ -45,6 +47,7 @@ public:
+   ZDirector();
+ 
+   static void evaluate_rules();
++  static void minor_completed(bool soft_max_exceeded);
+ };
+ 
+ #endif // SHARE_GC_Z_ZDIRECTOR_HPP
 diff --git a/src/hotspot/share/gc/z/zDriver.cpp b/src/hotspot/share/gc/z/zDriver.cpp
-index e8f7af1..22d7206 100644
+index e8f7af1..5840599 100644
 --- a/src/hotspot/share/gc/z/zDriver.cpp
 +++ b/src/hotspot/share/gc/z/zDriver.cpp
 @@ -29,6 +29,7 @@
@@ -712,6 +813,55 @@ index e8f7af1..22d7206 100644
      ZDriverLocker locker;
  
      abortpoint();
+@@ -213,6 +218,15 @@ void ZDriverMinor::run_thread() {
+ 
+     abortpoint();
+ 
++    const ZHeap* const heap = ZHeap::heap();
++    const size_t used_after_minor = heap->used();
++    const size_t soft_max_capacity = heap->soft_max_capacity();
++    const bool post_minor_soft_max_exceeded = used_after_minor > soft_max_capacity;
++    if (post_minor_soft_max_exceeded) {
++      log_debug(gc, director)("Rule Major: Post-Minor Soft Max, UsedAfterMinor: %zuMB, SoftMax: %zuMB",
++                              used_after_minor / M, soft_max_capacity / M);
++    }
++
+     // Notify GC completed
+     _port.ack();
+ 
+@@ -220,7 +234,7 @@ void ZDriverMinor::run_thread() {
+     handle_alloc_stalls();
+ 
+     // Good point to consider back-to-back GC
+-    ZDirector::evaluate_rules();
++    ZDirector::minor_completed(post_minor_soft_max_exceeded);
+   }
+ }
+ 
+@@ -247,6 +261,7 @@ static bool should_clear_all_soft_references(GCCause::Cause cause) {
+   case GCCause::_z_timer:
+   case GCCause::_z_warmup:
+   case GCCause::_z_allocation_rate:
++  case GCCause::_z_high_usage:
+   case GCCause::_z_proactive:
+   case GCCause::_metadata_GC_threshold:
+   case GCCause::_codecache_GC_threshold:
+@@ -285,6 +300,7 @@ static bool should_preclean_young(GCCause::Cause cause) {
+   case GCCause::_z_timer:
+   case GCCause::_z_warmup:
+   case GCCause::_z_allocation_rate:
++  case GCCause::_z_high_usage:
+   case GCCause::_z_proactive:
+   case GCCause::_metadata_GC_threshold:
+   case GCCause::_codecache_GC_threshold:
+@@ -349,6 +365,7 @@ void ZDriverMajor::collect(const ZDriverRequest& request) {
+   case GCCause::_z_timer:
+   case GCCause::_z_warmup:
+   case GCCause::_z_allocation_rate:
++  case GCCause::_z_high_usage:
+   case GCCause::_z_allocation_stall:
+   case GCCause::_z_proactive:
+   case GCCause::_codecache_GC_threshold:
 diff --git a/src/hotspot/share/gc/z/zForwarding.hpp b/src/hotspot/share/gc/z/zForwarding.hpp
 index c58c479..a4992d0 100644
 --- a/src/hotspot/share/gc/z/zForwarding.hpp
@@ -1380,7 +1530,7 @@ index 0000000..8fcf5f0
 +};
 +#endif // SHARE_GC_Z_ZOLDPREEMPTION_HPP
 diff --git a/src/hotspot/share/gc/z/zPage.cpp b/src/hotspot/share/gc/z/zPage.cpp
-index 80e10dc..71ec311 100644
+index 80e10dc..4c698e0 100644
 --- a/src/hotspot/share/gc/z/zPage.cpp
 +++ b/src/hotspot/share/gc/z/zPage.cpp
 @@ -27,6 +27,7 @@
@@ -1468,7 +1618,7 @@ index 96900a3..ba56a04 100644
    void reset_top_for_allocation();
  
 diff --git a/src/hotspot/share/gc/z/zPage.inline.hpp b/src/hotspot/share/gc/z/zPage.inline.hpp
-index f6c2029..06dd58f 100644
+index f6c2029..cde885e 100644
 --- a/src/hotspot/share/gc/z/zPage.inline.hpp
 +++ b/src/hotspot/share/gc/z/zPage.inline.hpp
 @@ -172,6 +172,10 @@ inline ZPageAge ZPage::age() const {
