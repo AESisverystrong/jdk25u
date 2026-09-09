@@ -543,2059 +543,6 @@ index 0000000000000000000000000000000000000000..7148ac488e44308a2bf568505005fd66
 +mv "$state/acknowledged-head.next" "$state/acknowledged-head"
 +if $cache_ok; then cp "$stage/cache-next.snar" "$state/cache.snar.next"; mv "$state/cache.snar.next" "$state/cache.snar"; fi
 +printf '%s\n' "$archive" > "$state/latest-archive"
-diff --git a/src/hotspot/share/classfile/systemDictionary.cpp b/src/hotspot/share/classfile/systemDictionary.cpp
-index ee526e9bb07dc8fa2d0a217eb38b90f6a3d0c43c..37fc7f7e0ff3846d4ae17744d37e9e807960f17b 100644
---- a/src/hotspot/share/classfile/systemDictionary.cpp
-+++ b/src/hotspot/share/classfile/systemDictionary.cpp
-@@ -75,6 +75,7 @@
- #include "runtime/java.hpp"
- #include "runtime/javaCalls.hpp"
- #include "runtime/mutexLocker.hpp"
-+#include "runtime/os.hpp"
- #include "runtime/sharedRuntime.hpp"
- #include "runtime/signature.hpp"
- #include "runtime/synchronizer.hpp"
-@@ -1505,26 +1506,49 @@ bool SystemDictionary::do_unloading(GCTimer* gc_timer) {
-   {
-     GCTraceTime(Debug, gc, phases) t("ClassLoaderData", gc_timer);
-     assert_locked_or_safepoint(ClassLoaderDataGraph_lock);  // caller locks.
-+
-+    double start = os::elapsedTime();
-     // First, mark for unload all ClassLoaderData referencing a dead class loader.
-     unloading_occurred = ClassLoaderDataGraph::do_unloading();
-+    log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=CLDG Do Unloading duration=%.3fms",
-+                           (os::elapsedTime() - start) * 1000.0);
-+
-     if (unloading_occurred) {
-       ConditionalMutexLocker ml2(Module_lock, is_concurrent);
-       JFR_ONLY(Jfr::on_unloading_classes();)
-       MANAGEMENT_ONLY(FinalizerService::purge_unloaded();)
-       ConditionalMutexLocker ml1(SystemDictionary_lock, is_concurrent);
-+
-+      start = os::elapsedTime();
-       ClassLoaderDataGraph::clean_module_and_package_info();
-+      log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Module Package Cleanup duration=%.3fms",
-+                             (os::elapsedTime() - start) * 1000.0);
-+
-+      start = os::elapsedTime();
-       LoaderConstraintTable::purge_loader_constraints();
-+      log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Loader Constraints duration=%.3fms",
-+                             (os::elapsedTime() - start) * 1000.0);
-+
-+      start = os::elapsedTime();
-       ResolutionErrorTable::purge_resolution_errors();
-+      log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Resolution Errors duration=%.3fms",
-+                             (os::elapsedTime() - start) * 1000.0);
-     }
-   }
- 
-   GCTraceTime(Debug, gc, phases) t("Trigger cleanups", gc_timer);
- 
-   if (unloading_occurred) {
-+    double start = os::elapsedTime();
-     SymbolTable::trigger_cleanup();
-+    log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Symbol Cleanup Trigger duration=%.3fms",
-+                           (os::elapsedTime() - start) * 1000.0);
- 
-     ConditionalMutexLocker ml(ClassInitError_lock, is_concurrent);
-+    start = os::elapsedTime();
-     InstanceKlass::clean_initialization_error_table();
-+    log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Class Init Errors duration=%.3fms",
-+                           (os::elapsedTime() - start) * 1000.0);
-   }
- 
-   return unloading_occurred;
-diff --git a/src/hotspot/share/gc/z/zArguments.cpp b/src/hotspot/share/gc/z/zArguments.cpp
-index 03aa8e5acee18a439eb385dfc02cce95fc4ae1ea..3f32e1852dcf1f1d8dfaac1f527cfd2cc5d6769d 100644
---- a/src/hotspot/share/gc/z/zArguments.cpp
-+++ b/src/hotspot/share/gc/z/zArguments.cpp
-@@ -151,7 +151,9 @@ void ZArguments::initialize() {
-   // Set medium page size here because MaxTenuringThreshold may use it.
-   ZHeuristics::set_medium_page_size();
- 
--  if (!FLAG_IS_DEFAULT(ZTenuringThreshold) && ZTenuringThreshold != -1) {
-+  if (!FLAG_IS_DEFAULT(ZTenuringThreshold) &&
-+      ZTenuringThreshold != -1 &&
-+      ZTenuringThreshold <= static_cast<int>(markWord::max_age + 1)) {
-     FLAG_SET_ERGO_IF_DEFAULT(MaxTenuringThreshold, (uint)ZTenuringThreshold);
-     if (MaxTenuringThreshold == 0) {
-       FLAG_SET_ERGO_IF_DEFAULT(AlwaysTenure, true);
-@@ -185,11 +187,6 @@ void ZArguments::initialize() {
-                                           ZGranuleSize / M));
-   }
- 
--  if (!FLAG_IS_DEFAULT(ZTenuringThreshold) && ZTenuringThreshold > static_cast<int>(MaxTenuringThreshold)) {
--    vm_exit_during_initialization(err_msg("ZTenuringThreshold must be be within bounds of "
--                                          "MaxTenuringThreshold"));
--  }
--
- #ifdef COMPILER2
-   // Enable loop strip mining by default
-   if (FLAG_IS_DEFAULT(UseCountedLoopSafepoints)) {
-diff --git a/src/hotspot/share/gc/z/zBarrierSet.cpp b/src/hotspot/share/gc/z/zBarrierSet.cpp
-index 43ea791a260ba0f68aae9c0e7a57ec6106e3cc2f..98abb7d4238b92f6958b07ea93d68b1fc5aca514 100644
---- a/src/hotspot/share/gc/z/zBarrierSet.cpp
-+++ b/src/hotspot/share/gc/z/zBarrierSet.cpp
-@@ -141,7 +141,7 @@ void ZBarrierSet::on_slowpath_allocation_exit(JavaThread* thread, oop new_obj) {
-     return;
-   }
- 
--  if (ZRelocate::compute_to_age(age) != ZPageAge::old) {
-+  if (ZRelocate::compute_to_age(page) != ZPageAge::old) {
-     return;
-   }
- 
-diff --git a/src/hotspot/share/gc/z/zBreakpoint.cpp b/src/hotspot/share/gc/z/zBreakpoint.cpp
-index 00e91c2c28aabbeacb7328ea00fa3a54cda2a073..623b5f98fbbf0e47ce3418449d0754edfef391ea 100644
---- a/src/hotspot/share/gc/z/zBreakpoint.cpp
-+++ b/src/hotspot/share/gc/z/zBreakpoint.cpp
-@@ -23,6 +23,7 @@
- 
- #include "gc/shared/concurrentGCBreakpoints.hpp"
- #include "gc/z/zBreakpoint.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "runtime/mutexLocker.hpp"
- #include "utilities/debug.hpp"
- 
-@@ -50,13 +51,16 @@ void ZBreakpoint::at_after_gc() {
- }
- 
- void ZBreakpoint::at_after_marking_started() {
-+  ZOldPreemptionLeaver preemption_leaver;
-   ConcurrentGCBreakpoints::at("AFTER MARKING STARTED");
- }
- 
- void ZBreakpoint::at_before_marking_completed() {
-+  ZOldPreemptionLeaver preemption_leaver;
-   ConcurrentGCBreakpoints::at("BEFORE MARKING COMPLETED");
- }
- 
- void ZBreakpoint::at_after_reference_processing_started() {
-+  ZOldPreemptionLeaver preemption_leaver;
-   ConcurrentGCBreakpoints::at("AFTER CONCURRENT REFERENCE PROCESSING STARTED");
- }
-diff --git a/src/hotspot/share/gc/z/zDirector.cpp b/src/hotspot/share/gc/z/zDirector.cpp
-index f1256eecd19bf80acf8489fedac577363ca7dfc2..6f7cfa2044a518612887ba4bfb29ae024461e0c6 100644
---- a/src/hotspot/share/gc/z/zDirector.cpp
-+++ b/src/hotspot/share/gc/z/zDirector.cpp
-@@ -73,7 +73,8 @@ struct ZDirectorStats {
- 
- ZDirector::ZDirector()
-   : _monitor(),
--    _stopped(false) {
-+    _stopped(false),
-+    _post_minor_major_triggered(false) {
-   _director = this;
-   set_name("ZDirector");
-   create_and_start();
-@@ -640,11 +641,19 @@ static GCCause::Cause make_minor_gc_decision(const ZDirectorStats& stats) {
-   return GCCause::_no_gc;
- }
- 
--static GCCause::Cause make_major_gc_decision(const ZDirectorStats& stats) {
-+static bool rule_major_post_minor_threshold(bool post_minor_major_triggered) {
-+  return post_minor_major_triggered;
-+}
-+
-+static GCCause::Cause make_major_gc_decision(const ZDirectorStats& stats, bool post_minor_major_triggered) {
-   if (ZDriver::major()->is_busy()) {
-     return GCCause::_no_gc;
-   }
- 
-+  if (rule_major_post_minor_threshold(post_minor_major_triggered)) {
-+    return GCCause::_z_high_usage;
-+  }
-+
-   if (rule_major_timer(stats)) {
-     return GCCause::_z_timer;
-   }
-@@ -829,9 +838,9 @@ static void start_minor_gc(const ZDirectorStats& stats, GCCause::Cause cause) {
-   ZDriver::minor()->collect(request);
- }
- 
--static bool start_gc(const ZDirectorStats& stats) {
-+static bool start_gc(const ZDirectorStats& stats, bool post_minor_major_triggered) {
-   // Try start major collections first as they include a minor collection
--  const GCCause::Cause major_cause = make_major_gc_decision(stats);
-+  const GCCause::Cause major_cause = make_major_gc_decision(stats, post_minor_major_triggered);
-   if (major_cause != GCCause::_no_gc) {
-     start_major_gc(stats, major_cause);
-     return true;
-@@ -857,6 +866,19 @@ void ZDirector::evaluate_rules() {
-   _director->_monitor.notify();
- }
- 
-+void ZDirector::minor_completed(bool major_triggered) {
-+  ZLocker<ZConditionLock> locker(&_director->_monitor);
-+  _director->_post_minor_major_triggered |= major_triggered;
-+  _director->_monitor.notify();
-+}
-+
-+bool ZDirector::consume_post_minor_major_triggered() {
-+  ZLocker<ZConditionLock> locker(&_monitor);
-+  const bool triggered = _post_minor_major_triggered;
-+  _post_minor_major_triggered = false;
-+  return triggered;
-+}
-+
- bool ZDirector::wait_for_tick() {
-   const uint64_t interval_ms = MILLIUNITS / DecisionHz;
- 
-@@ -928,8 +950,9 @@ static ZDirectorStats sample_stats() {
- void ZDirector::run_thread() {
-   // Main loop
-   while (wait_for_tick()) {
-+    const bool post_minor_major_triggered = consume_post_minor_major_triggered();
-     ZDirectorStats stats = sample_stats();
--    if (!start_gc(stats)) {
-+    if (!start_gc(stats, post_minor_major_triggered)) {
-       adjust_gc(stats);
-     }
-   }
-diff --git a/src/hotspot/share/gc/z/zDirector.hpp b/src/hotspot/share/gc/z/zDirector.hpp
-index 624d356ffe2717692f54e47c01ffc4c3de16061e..830be5ac7da633058fcc89875ac42f32eb62a80b 100644
---- a/src/hotspot/share/gc/z/zDirector.hpp
-+++ b/src/hotspot/share/gc/z/zDirector.hpp
-@@ -34,8 +34,10 @@ private:
- 
-   ZConditionLock _monitor;
-   bool           _stopped;
-+  bool           _post_minor_major_triggered;
- 
-   bool wait_for_tick();
-+  bool consume_post_minor_major_triggered();
- 
- protected:
-   virtual void run_thread();
-@@ -45,6 +47,7 @@ public:
-   ZDirector();
- 
-   static void evaluate_rules();
-+  static void minor_completed(bool major_triggered);
- };
- 
- #endif // SHARE_GC_Z_ZDIRECTOR_HPP
-diff --git a/src/hotspot/share/gc/z/zDriver.cpp b/src/hotspot/share/gc/z/zDriver.cpp
-index e8f7af179cb4c35bf97c86fceeab63f70c52f9b2..64fcac0adc50c0df13570ede7377a5546d1dd7d7 100644
---- a/src/hotspot/share/gc/z/zDriver.cpp
-+++ b/src/hotspot/share/gc/z/zDriver.cpp
-@@ -29,12 +29,14 @@
- #include "gc/z/zCollectedHeap.hpp"
- #include "gc/z/zDirector.hpp"
- #include "gc/z/zDriver.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "gc/z/zGCIdPrinter.hpp"
- #include "gc/z/zGeneration.inline.hpp"
- #include "gc/z/zHeap.inline.hpp"
- #include "gc/z/zLock.inline.hpp"
- #include "gc/z/zServiceability.hpp"
- #include "gc/z/zStat.hpp"
-+#include "gc/z/z_globals.hpp"
- 
- static const ZStatPhaseCollection ZPhaseCollectionMinor("Minor Collection", true /* minor */);
- static const ZStatPhaseCollection ZPhaseCollectionMajor("Major Collection", false /* minor */);
-@@ -62,6 +64,7 @@ ZDriverMajor* ZDriver::_major;
- 
- void ZDriver::initialize() {
-   _lock = new ZLock();
-+  ZOldPreemption::initialize();
- }
- 
- void ZDriver::lock() {
-@@ -187,7 +190,9 @@ public:
- void ZDriverMinor::gc(const ZDriverRequest& request) {
-   ZDriverScopeMinor scope(request, &_gc_timer);
-   ZGCIdMinor minor_id(gc_id());
-+  ZOldPreemption::minor_start();
-   ZGeneration::young()->collect(ZYoungType::minor, &_gc_timer);
-+  ZOldPreemption::minor_end();
- }
- 
- static void handle_alloc_stalling_for_young() {
-@@ -204,6 +209,7 @@ void ZDriverMinor::run_thread() {
-     // Wait for GC request
-     const ZDriverRequest request = _port.receive();
- 
-+    ZOldPreemptionRequest preemption;
-     ZDriverLocker locker;
- 
-     abortpoint();
-@@ -213,6 +219,19 @@ void ZDriverMinor::run_thread() {
- 
-     abortpoint();
- 
-+    const ZHeap* const heap = ZHeap::heap();
-+    const size_t used_after_minor = heap->used();
-+    const size_t soft_max_capacity = heap->soft_max_capacity();
-+    const uintx trigger_percent = ZOldGCPostMinorSoftMaxPercent;
-+    const double trigger_capacity = (double)soft_max_capacity * ((double)trigger_percent / 100.0);
-+    const bool post_minor_major_triggered = ZOldGCPostMinorSoftMaxMajor &&
-+                                            (double)used_after_minor >= trigger_capacity;
-+    if (post_minor_major_triggered) {
-+      log_debug(gc, director)("Rule Major: Post-Minor SoftMax Threshold, UsedAfterMinor: %zuMB, SoftMax: %zuMB, Trigger: %zu%% (%.1fMB)",
-+                              used_after_minor / M, soft_max_capacity / M, (size_t)trigger_percent,
-+                              trigger_capacity / M);
-+    }
-+
-     // Notify GC completed
-     _port.ack();
- 
-@@ -220,7 +239,7 @@ void ZDriverMinor::run_thread() {
-     handle_alloc_stalls();
- 
-     // Good point to consider back-to-back GC
--    ZDirector::evaluate_rules();
-+    ZDirector::minor_completed(post_minor_major_triggered);
-   }
- }
- 
-@@ -247,6 +266,7 @@ static bool should_clear_all_soft_references(GCCause::Cause cause) {
-   case GCCause::_z_timer:
-   case GCCause::_z_warmup:
-   case GCCause::_z_allocation_rate:
-+  case GCCause::_z_high_usage:
-   case GCCause::_z_proactive:
-   case GCCause::_metadata_GC_threshold:
-   case GCCause::_codecache_GC_threshold:
-@@ -285,6 +305,7 @@ static bool should_preclean_young(GCCause::Cause cause) {
-   case GCCause::_z_timer:
-   case GCCause::_z_warmup:
-   case GCCause::_z_allocation_rate:
-+  case GCCause::_z_high_usage:
-   case GCCause::_z_proactive:
-   case GCCause::_metadata_GC_threshold:
-   case GCCause::_codecache_GC_threshold:
-@@ -349,6 +370,7 @@ void ZDriverMajor::collect(const ZDriverRequest& request) {
-   case GCCause::_z_timer:
-   case GCCause::_z_warmup:
-   case GCCause::_z_allocation_rate:
-+  case GCCause::_z_high_usage:
-   case GCCause::_z_allocation_stall:
-   case GCCause::_z_proactive:
-   case GCCause::_codecache_GC_threshold:
-diff --git a/src/hotspot/share/gc/z/zForwarding.hpp b/src/hotspot/share/gc/z/zForwarding.hpp
-index c58c479984f9c97031838019ec68abd5fb9aa75b..a4992d0916edbff1e72dad6c6c91a20dc751ea4f 100644
---- a/src/hotspot/share/gc/z/zForwarding.hpp
-+++ b/src/hotspot/share/gc/z/zForwarding.hpp
-@@ -61,6 +61,8 @@ private:
-   ZPage* const           _page;
-   const ZPageAge         _from_age;
-   const ZPageAge         _to_age;
-+  const uint32_t         _from_young_age;
-+  const uint32_t         _to_young_age;
-   volatile bool          _claimed;
-   mutable ZConditionLock _ref_lock;
-   volatile int32_t       _ref_count;
-@@ -94,15 +96,17 @@ private:
-   template <typename Function>
-   void object_iterate_forwarded_via_livemap(Function function);
- 
--  ZForwarding(ZPage* page, ZPageAge to_age, size_t nentries);
-+  ZForwarding(ZPage* page, ZPageAge to_age, uint32_t to_young_age, size_t nentries);
- 
- public:
-   static uint32_t nentries(const ZPage* page);
--  static ZForwarding* alloc(ZForwardingAllocator* allocator, ZPage* page, ZPageAge to_age);
-+  static ZForwarding* alloc(ZForwardingAllocator* allocator, ZPage* page, ZPageAge to_age, uint32_t to_young_age);
- 
-   ZPageType type() const;
-   ZPageAge from_age() const;
-   ZPageAge to_age() const;
-+  uint32_t from_young_age() const;
-+  uint32_t to_young_age() const;
-   zoffset start() const;
-   zoffset_end end() const;
-   size_t size() const;
-diff --git a/src/hotspot/share/gc/z/zForwarding.inline.hpp b/src/hotspot/share/gc/z/zForwarding.inline.hpp
-index eb5f4a36161ede11f234a6ddbdbaebbd8f711ba4..fb9392a16948c1a1a1f4be3dbb55db4eb179f76d 100644
---- a/src/hotspot/share/gc/z/zForwarding.inline.hpp
-+++ b/src/hotspot/share/gc/z/zForwarding.inline.hpp
-@@ -50,19 +50,21 @@ inline uint32_t ZForwarding::nentries(const ZPage* page) {
-   return round_up_power_of_2(page->live_objects() * 2);
- }
- 
--inline ZForwarding* ZForwarding::alloc(ZForwardingAllocator* allocator, ZPage* page, ZPageAge to_age) {
-+inline ZForwarding* ZForwarding::alloc(ZForwardingAllocator* allocator, ZPage* page, ZPageAge to_age, uint32_t to_young_age) {
-   const size_t nentries = ZForwarding::nentries(page);
-   void* const addr = AttachedArray::alloc(allocator, nentries);
--  return ::new (addr) ZForwarding(page, to_age, nentries);
-+  return ::new (addr) ZForwarding(page, to_age, to_young_age, nentries);
- }
- 
--inline ZForwarding::ZForwarding(ZPage* page, ZPageAge to_age, size_t nentries)
-+inline ZForwarding::ZForwarding(ZPage* page, ZPageAge to_age, uint32_t to_young_age, size_t nentries)
-   : _virtual(page->virtual_memory()),
-     _object_alignment_shift(page->object_alignment_shift()),
-     _entries(nentries),
-     _page(page),
-     _from_age(page->age()),
-     _to_age(to_age),
-+    _from_young_age(page->young_age()),
-+    _to_young_age(to_young_age),
-     _claimed(false),
-     _ref_lock(),
-     _ref_count(1),
-@@ -86,6 +88,14 @@ inline ZPageAge ZForwarding::to_age() const {
-   return _to_age;
- }
- 
-+inline uint32_t ZForwarding::from_young_age() const {
-+  return _from_young_age;
-+}
-+
-+inline uint32_t ZForwarding::to_young_age() const {
-+  return _to_young_age;
-+}
-+
- inline zoffset ZForwarding::start() const {
-   return _virtual.start();
- }
-diff --git a/src/hotspot/share/gc/z/zGeneration.cpp b/src/hotspot/share/gc/z/zGeneration.cpp
-index 772c5a0a98b1d2c248791e7ee138e44e00fd1281..1e23742a729412e665c158d2b26e710c3ddb561f 100644
---- a/src/hotspot/share/gc/z/zGeneration.cpp
-+++ b/src/hotspot/share/gc/z/zGeneration.cpp
-@@ -35,6 +35,7 @@
- #include "gc/z/zBreakpoint.hpp"
- #include "gc/z/zCollectedHeap.hpp"
- #include "gc/z/zDriver.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "gc/z/zForwarding.hpp"
- #include "gc/z/zForwardingTable.inline.hpp"
- #include "gc/z/zGeneration.inline.hpp"
-@@ -188,6 +189,9 @@ void ZGeneration::select_relocation_set(bool promote_all) {
-   {
-     ZGenerationPagesIterator pt_iter(_page_table, _id, _page_allocator);
-     for (ZPage* page; pt_iter.next(&page);) {
-+      if (is_old() && ZOldPreemption::requested()) {
-+        pt_iter.yield([]() { ZOldPreemption::poll(false); });
-+      }
-       if (!page->is_relocatable()) {
-         // Not relocatable, don't register
-         continue;
-@@ -240,6 +244,7 @@ void ZGeneration::select_relocation_set(bool promote_all) {
-   ZRelocationSetIterator rs_iter(&_relocation_set);
-   for (ZForwarding* forwarding; rs_iter.next(&forwarding);) {
-     _forwarding_table.insert(forwarding);
-+    if (is_old()) ZOldPreemption::poll(false);
-   }
- 
-   // Update statistics
-@@ -256,6 +261,7 @@ void ZGeneration::reset_relocation_set() {
-   ZRelocationSetIterator iter(&_relocation_set);
-   for (ZForwarding* forwarding; iter.next(&forwarding);) {
-     _forwarding_table.remove(forwarding);
-+    if (is_old()) ZOldPreemption::poll(false);
-   }
- 
-   // Reset relocation set
-@@ -688,7 +694,7 @@ void ZGenerationYoung::select_tenuring_threshold(ZRelocationSetSelectorStats sta
-     _tenuring_threshold = compute_tenuring_threshold(stats);
-     reason = "Computed";
-   }
--  log_info(gc, reloc)("Using tenuring threshold: %d (%s)", _tenuring_threshold, reason);
-+  log_info(gc, reloc)("Using tenuring threshold: %u (%s)", _tenuring_threshold, reason);
- }
- 
- uint ZGenerationYoung::compute_tenuring_threshold(ZRelocationSetSelectorStats stats) {
-@@ -996,6 +1002,7 @@ bool ZGenerationOld::should_record_stats() {
- 
- void ZGenerationOld::collect(ConcurrentGCTimer* timer) {
-   ZGenerationCollectionScopeOld scope(timer);
-+  ZOldPreemptionCycle preemption;
- 
-   // Phase 1: Concurrent Mark
-   concurrent_mark();
-@@ -1033,6 +1040,7 @@ void ZGenerationOld::collect(ConcurrentGCTimer* timer) {
- 
-   abortpoint();
- 
-+  ZOldPreemption::phase("Remap + Relocate Start");
-   {
-     ZDriverLocker locker;
- 
-@@ -1069,6 +1077,7 @@ void ZGenerationOld::concurrent_mark() {
-   ZStatTimerOld timer(ZPhaseConcurrentMarkOld);
-   ZBreakpoint::at_after_marking_started();
-   mark_roots();
-+  ZOldPreemption::phase("Mark");
-   mark_follow();
-   ZBreakpoint::at_before_marking_completed();
- }
-@@ -1091,26 +1100,31 @@ public:
- };
- 
- bool ZGenerationOld::pause_mark_end() {
-+  ZOldPreemption::phase("Mark End");
-   return VM_ZMarkEndOld().pause();
- }
- 
- void ZGenerationOld::concurrent_mark_continue() {
-+  ZOldPreemption::phase("Mark Continue");
-   ZStatTimerOld timer(ZPhaseConcurrentMarkContinueOld);
-   mark_follow();
- }
- 
- void ZGenerationOld::concurrent_mark_free() {
-+  ZOldPreemption::phase("Mark Free");
-   ZStatTimerOld timer(ZPhaseConcurrentMarkFreeOld);
-   mark_free();
- }
- 
- void ZGenerationOld::concurrent_process_non_strong_references() {
-+  ZOldPreemption::phase("Process Non-Strong");
-   ZStatTimerOld timer(ZPhaseConcurrentProcessNonStrongOld);
-   ZBreakpoint::at_after_reference_processing_started();
-   process_non_strong_references();
- }
- 
- void ZGenerationOld::concurrent_reset_relocation_set() {
-+  ZOldPreemption::phase("Reset Relocation Set");
-   ZStatTimerOld timer(ZPhaseConcurrentResetRelocationSetOld);
-   reset_relocation_set();
- }
-@@ -1135,6 +1149,7 @@ public:
- };
- 
- void ZGenerationOld::pause_verify() {
-+  ZOldPreemption::phase("Verify");
-   // Note that we block out concurrent young collections when performing the
-   // verification. The verification checks that store good oops in the
-   // old generation have a corresponding remembered set entry, or is in
-@@ -1150,6 +1165,7 @@ void ZGenerationOld::pause_verify() {
- }
- 
- void ZGenerationOld::concurrent_select_relocation_set() {
-+  ZOldPreemption::phase("Select Relocation Set");
-   ZStatTimerOld timer(ZPhaseConcurrentSelectRelocationSetOld);
-   select_relocation_set(false /* promote_all */);
- }
-@@ -1182,6 +1198,8 @@ void ZGenerationOld::pause_relocate_start() {
- }
- 
- void ZGenerationOld::concurrent_relocate() {
-+  // The queue already reserves workers: launch them before driver parking.
-+  ZOldPreemption::phase("Relocate Setup", false);
-   ZStatTimerOld timer(ZPhaseConcurrentRelocatedOld);
-   relocate();
- }
-@@ -1321,6 +1339,7 @@ void ZGenerationOld::process_non_strong_references() {
-   _reference_processor.process_references();
- 
-   // Process weak roots
-+  ZOldPreemption::phase("Weak Roots");
-   _weak_roots_processor.process_weak_roots();
- 
-   ClassUnloadingContext ctx(_workers.active_workers(),
-@@ -1328,6 +1347,7 @@ void ZGenerationOld::process_non_strong_references() {
-                             true /* lock_nmethod_free_separately */);
- 
-   // Unlink stale metadata and nmethods
-+  ZOldPreemption::phase("Class Unlink");
-   _unload.unlink();
- 
-   // Perform a handshake. This is needed 1) to make sure that stale
-@@ -1338,18 +1358,22 @@ void ZGenerationOld::process_non_strong_references() {
-   // this point the mutator could see the unblocked state and pass
-   // this invalid oop through the normal barrier path, which would
-   // incorrectly try to mark the oop.
-+  ZOldPreemption::phase("Handshake");
-   ZRendezvousHandshakeClosure cl;
-   Handshake::execute(&cl);
- 
-   // GC threads are not part of the handshake above.
-   // Explicitly "handshake" them.
-+  ZOldPreemption::phase("GC Rendezvous");
-   ZRendezvousGCThreads op;
-   VMThread::execute(&op);
- 
-   // Unblock resurrection of weak/phantom references
-+  ZOldPreemption::phase("Unblock Resurrection");
-   ZResurrection::unblock();
- 
-   // Purge stale metadata and nmethods that were unlinked
-+  ZOldPreemption::phase("Class Purge");
-   _unload.purge();
- 
-   // Enqueue Soft/Weak/Final/PhantomReferences. Note that this
-@@ -1358,6 +1382,7 @@ void ZGenerationOld::process_non_strong_references() {
-   // that were just enqueued, which would incorrectly return null
-   // during the resurrection block window, since such referents
-   // are only Finalizable marked.
-+  ZOldPreemption::phase("Enqueue References");
-   _reference_processor.enqueue_references();
- 
-   // Clear old markings claim bits.
-diff --git a/src/hotspot/share/gc/z/zMark.cpp b/src/hotspot/share/gc/z/zMark.cpp
-index 9846f1244eceaaa53a8ebe84a2a95e803ab73778..7d872adafbf830e0e00f019d3f04ab20e4f416d4 100644
---- a/src/hotspot/share/gc/z/zMark.cpp
-+++ b/src/hotspot/share/gc/z/zMark.cpp
-@@ -38,6 +38,7 @@
- #include "gc/z/zHeap.inline.hpp"
- #include "gc/z/zLock.inline.hpp"
- #include "gc/z/zMark.inline.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "gc/z/zMarkCache.inline.hpp"
- #include "gc/z/zMarkContext.inline.hpp"
- #include "gc/z/zMarkStack.inline.hpp"
-@@ -463,6 +464,7 @@ bool ZMark::rebalance_work(ZMarkContext* context) {
-     flush(Thread::current());
-   }
- 
-+  ZOldPreemption::poll(true);
-   SuspendibleThreadSet::yield();
- 
-   return ZAbort::should_abort() || _generation->should_worker_resize();
-@@ -480,11 +482,14 @@ bool ZMark::drain(ZMarkContext* context) {
-   while (stacks->pop(&_marking_smr, &_stripes, context->stripe(), &entry)) {
-     mark_and_follow(context, entry);
- 
--    if ((processed++ & 31) == 0 && rebalance_work(context)) {
--      return false;
-+    if (++processed == 32) {
-+      ZOldPreemption::mark_progress(processed);
-+      processed = 0;
-+      if (rebalance_work(context)) return false;
-     }
-   }
- 
-+  ZOldPreemption::mark_progress(processed);
-   return true;
- }
- 
-@@ -634,6 +639,7 @@ bool ZMark::follow_work(bool partial) {
-   ZMarkContext context(ZMarkStripesMax, stripe, stacks);
- 
-   for (;;) {
-+    ZOldPreemption::poll(true);
-     if (!drain(&context)) {
-       leave();
-       return false;
-@@ -653,6 +659,7 @@ bool ZMark::follow_work(bool partial) {
-       continue;
-     }
- 
-+    if (ZOldPreemption::joined()) ZHeap::heap()->mark_flush(Thread::current());
-     if (try_terminate(&context)) {
-       // Terminate
-       return true;
-@@ -798,7 +805,7 @@ private:
- 
- public:
-   ZMarkOldRootsTask(ZMark* mark)
--    : ZTask("ZMarkOldRootsTask"),
-+    : ZTask("ZMarkOldRootsTask", ZOldTaskMode::cooperative),
-       _mark(mark),
-       _roots_colored(ZGenerationIdOptional::old),
-       _roots_uncolored(ZGenerationIdOptional::old),
-@@ -808,17 +815,21 @@ public:
-       _nm_cl() {}
- 
-   virtual void work() {
-+    SuspendibleThreadSetJoiner sts_joiner(ZOldPreemption::joined());
-+
-     {
-       ZStatTimerWorker timer(ZSubPhaseConcurrentMarkRootColoredOld);
-       _roots_colored.apply(&_cl_colored,
-                            &_cld_cl);
-     }
-+    ZOldPreemption::poll(true);
- 
-     {
-       ZStatTimerWorker timer(ZSubPhaseConcurrentMarkRootUncoloredOld);
-       _roots_uncolored.apply(&_thread_cl,
-                              &_nm_cl);
-     }
-+    ZOldPreemption::poll(true);
- 
-     // Flush and free worker stacks. Needed here since
-     // the set of workers executing during root scanning
-@@ -892,7 +903,7 @@ private:
- 
- public:
-   ZMarkTask(ZMark* mark)
--    : ZRestartableTask("ZMarkTask"),
-+    : ZRestartableTask("ZMarkTask", ZOldTaskMode::cooperative),
-       _mark(mark) {
-     _mark->prepare_work();
-   }
-@@ -932,6 +943,10 @@ void ZMark::mark_young_roots() {
- void ZMark::mark_old_roots() {
-   SuspendibleThreadSetJoiner sts_joiner;
-   ZMarkOldRootsTask task(this);
-+  // Cooperative workers own STS membership while scanning. Do not leave the
-+  // Old driver joined in STS while it waits for workers that may park for a
-+  // Young collection.
-+  SuspendibleThreadSetLeaver sts_leaver(ZOldPreemption::joined());
-   workers()->run(&task);
- }
- 
-diff --git a/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp b/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
-index cdd9e7dce2525216e554e9899f633ae4c000fcbb..a42cc9922543c596e8e64a9f46e8578b8c51fd67 100644
---- a/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
-+++ b/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
-@@ -23,6 +23,7 @@
- 
- #ifndef SHARE_GC_Z_ZMARKTERMINATE_INLINE_HPP
- #define SHARE_GC_Z_ZMARKTERMINATE_INLINE_HPP
-+#include "gc/z/zOldPreemption.hpp"
- 
- #include "gc/z/zMarkTerminate.hpp"
- 
-@@ -67,6 +68,7 @@ inline void ZMarkTerminate::maybe_reduce_stripes(ZMarkStripeSet* stripes, size_t
- 
- inline bool ZMarkTerminate::try_terminate(ZMarkStripeSet* stripes, size_t used_nstripes) {
-   SuspendibleThreadSetLeaver sts_leaver;
-+  ZOldPreemptionLeaver old_leaver;
-   ZLocker<ZConditionLock> locker(&_lock);
- 
-   Atomic::store(&_nworking, _nworking - 1);
-diff --git a/src/hotspot/share/gc/z/zNMethod.cpp b/src/hotspot/share/gc/z/zNMethod.cpp
-index bf592c20fa296c08a6a91f2dfa5ddfe855985c99..90f80d07c782ca316b59d65f29d3494141404e4b 100644
---- a/src/hotspot/share/gc/z/zNMethod.cpp
-+++ b/src/hotspot/share/gc/z/zNMethod.cpp
-@@ -38,6 +38,7 @@
- #include "gc/z/zNMethod.hpp"
- #include "gc/z/zNMethodData.hpp"
- #include "gc/z/zNMethodTable.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "gc/z/zTask.hpp"
- #include "gc/z/zUncoloredRoot.inline.hpp"
- #include "gc/z/zWorkers.hpp"
-@@ -341,6 +342,13 @@ oop ZNMethod::oop_load(const nmethod* const_nm, int index, bool keep_alive) {
-   return to_oop(safe(obj));
- }
- 
-+class ZNMethodUnlinkPreemptionPoll : public StackObj {
-+public:
-+  ~ZNMethodUnlinkPreemptionPoll() {
-+    ZOldPreemption::poll(true);
-+  }
-+};
-+
- class ZNMethodUnlinkClosure : public NMethodClosure {
- private:
-   bool _unloading_occurred;
-@@ -350,6 +358,10 @@ public:
-     : _unloading_occurred(unloading_occurred) {}
- 
-   virtual void do_nmethod(nmethod* nm) {
-+    // Construct before any per-nmethod locks. The guard runs after those
-+    // locks have been released, so a Minor never parks this worker while
-+    // holding an nmethod or compiled-IC lock.
-+    ZNMethodUnlinkPreemptionPoll preemption_poll;
-     if (nm->is_unloading()) {
-       // Unlink from the ZNMethodTable
-       ZNMethod::unregister_nmethod(nm);
-@@ -398,7 +410,7 @@ private:
- 
- public:
-   ZNMethodUnlinkTask(bool unloading_occurred)
--    : ZTask("ZNMethodUnlinkTask"),
-+    : ZTask("ZNMethodUnlinkTask", ZOldTaskMode::cooperative),
-       _cl(unloading_occurred) {
-     ZNMethodTable::nmethods_do_begin(false /* secondary */);
-   }
-@@ -408,12 +420,21 @@ public:
-   }
- 
-   virtual void work() {
-+    // The Old driver temporarily leaves STS while waiting for this task.
-+    // Each unlink worker therefore owns its STS membership directly and can
-+    // leave it together with Old-preemption participation at a safe poll.
-+    SuspendibleThreadSetJoiner sts_joiner(ZOldPreemption::joined());
-     ZNMethodTable::nmethods_do(false /* secondary */, &_cl);
-   }
- };
- 
- void ZNMethod::unlink(ZWorkers* workers, bool unloading_occurred) {
-   ZNMethodUnlinkTask task(unloading_occurred);
-+  // Keep begin/end under the caller's existing STS membership, but do not
-+  // leave that driver STS member blocked waiting for cooperative workers.
-+  // Otherwise a Young safepoint could wait for the driver while the workers
-+  // are parked waiting for that same Young collection to finish.
-+  SuspendibleThreadSetLeaver sts_leaver(ZOldPreemption::joined());
-   workers->run(&task);
- }
- 
-diff --git a/src/hotspot/share/gc/z/zOldPreemption.cpp b/src/hotspot/share/gc/z/zOldPreemption.cpp
-new file mode 100644
-index 0000000000000000000000000000000000000000..63e531cf1c997c4dd6d7237cfd17200699e86f85
---- /dev/null
-+++ b/src/hotspot/share/gc/z/zOldPreemption.cpp
-@@ -0,0 +1,217 @@
-+/*
-+ * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
-+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
-+ *
-+ * This code is free software; you can redistribute it and/or modify it
-+ * under the terms of the GNU General Public License version 2 only, as
-+ * published by the Free Software Foundation.
-+ *
-+ * This code is distributed in the hope that it will be useful, but WITHOUT
-+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
-+ * version 2 for more details (a copy is included in the LICENSE file that
-+ * accompanied this code).
-+ *
-+ * You should have received a copy of the GNU General Public License version
-+ * 2 along with this work; if not, write to the Free Software Foundation,
-+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
-+ *
-+ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
-+ * or visit www.oracle.com if you need additional information or have any
-+ * questions.
-+ */
-+
-+#include "gc/shared/gcId.hpp"
-+#include "gc/shared/suspendibleThreadSet.hpp"
-+#include "gc/z/zAbort.inline.hpp"
-+#include "gc/z/zGeneration.inline.hpp"
-+#include "gc/z/zHeap.inline.hpp"
-+#include "gc/z/zLock.inline.hpp"
-+#include "gc/z/zOldPreemption.hpp"
-+#include "gc/z/z_globals.hpp"
-+#include "logging/log.hpp"
-+#include "runtime/atomic.hpp"
-+#include "runtime/os.hpp"
-+#include "runtime/thread.inline.hpp"
-+
-+ZConditionLock* ZOldPreemption::_lock = nullptr;
-+volatile bool ZOldPreemption::_requested = false;
-+THREAD_LOCAL bool ZOldPreemption::_joined = false;
-+uint ZOldPreemption::_running = 0;
-+bool ZOldPreemption::_active = false;
-+uint ZOldPreemption::_cycle = 0;
-+uint64_t ZOldPreemption::_request = 0;
-+uint64_t ZOldPreemption::_pauses = 0;
-+volatile uint64_t ZOldPreemption::_mark_entries = 0;
-+volatile uint64_t ZOldPreemption::_relocated_pages = 0;
-+const char* ZOldPreemption::_phase = "Idle";
-+double ZOldPreemption::_requested_at = 0;
-+double ZOldPreemption::_parked_at = 0;
-+double ZOldPreemption::_paused_seconds = 0;
-+bool ZOldPreemption::_run_window_pending = false;
-+double ZOldPreemption::_preemption_allowed_at = 0;
-+void ZOldPreemption::initialize() { _lock = new ZConditionLock(); }
-+bool ZOldPreemption::joined() { return _joined; }
-+bool ZOldPreemption::requested() { return Atomic::load(&_requested); }
-+void ZOldPreemption::join() {
-+  if (!ZOldGCPreemption) return;
-+  assert(!_joined, "Nested Old participation");
-+  ZLocker<ZConditionLock> locker(_lock);
-+  while (_requested) _lock->wait();
-+  const bool first_running = _running == 0;
-+  _running++;
-+  _joined = true;
-+  if (_active && first_running && _run_window_pending) {
-+    const double now = os::elapsedTime();
-+    _run_window_pending = false;
-+    _preemption_allowed_at = now + (double)ZOldPreemptionMinRunMillis / 1000.0;
-+    log_debug(gc, preempt)("Old cycle=%u run-window started at=%.6f min=%zums eligible=%.6f",
-+                           _cycle, now, (size_t)ZOldPreemptionMinRunMillis,
-+                           _preemption_allowed_at);
-+    _lock->notify_all();
-+  }
-+}
-+void ZOldPreemption::leave() {
-+  if (!ZOldGCPreemption) return;
-+  ZLocker<ZConditionLock> locker(_lock);
-+  assert(_joined && _running > 0, "Missing Old participation");
-+  _joined = false;
-+  _running--;
-+  if (_running == 0) _lock->notify_all();
-+}
-+void ZOldPreemption::start() {
-+  join();
-+  if (!ZOldGCPreemption) return;
-+  ZLocker<ZConditionLock> locker(_lock);
-+  _cycle = GCId::current();
-+  _active = true;
-+  _pauses = 0;
-+  _paused_seconds = 0;
-+  _run_window_pending = false;
-+  _preemption_allowed_at = os::elapsedTime() + (double)ZOldPreemptionMinRunMillis / 1000.0;
-+  Atomic::store(&_mark_entries, uint64_t(0));
-+  Atomic::store(&_relocated_pages, uint64_t(0));
-+  _phase = "Mark Roots";
-+  log_debug(gc, preempt)("Old cycle=%u started epoch=%u min-run=%zums eligible=%.6f",
-+                         _cycle, ZGeneration::old()->seqnum(), (size_t)ZOldPreemptionMinRunMillis,
-+                         _preemption_allowed_at);
-+}
-+void ZOldPreemption::end() {
-+  if (!ZOldGCPreemption) return;
-+  poll(false);
-+  {
-+    ZLocker<ZConditionLock> locker(_lock);
-+    log_debug(gc, preempt)("Old cycle=%u %s pauses=" UINT64_FORMAT " paused=%.3fms mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
-+                          _cycle, ZAbort::should_abort() ? "shutdown-aborted" : "completed", _pauses,
-+                          _paused_seconds * 1000, Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
-+    _active = false;
-+    _phase = "Idle";
-+    _run_window_pending = false;
-+    _preemption_allowed_at = 0;
-+    _lock->notify_all();
-+  }
-+  leave();
-+}
-+void ZOldPreemption::phase(const char* name, bool poll_before) {
-+  if (!ZOldGCPreemption) return;
-+  if (poll_before) poll(false);
-+  ZLocker<ZConditionLock> locker(_lock);
-+  _phase = name;
-+  log_debug(gc, preempt)("Old cycle=%u phase=%s", _cycle, _phase);
-+}
-+void ZOldPreemption::poll(bool in_sts) {
-+  if (!_joined || (!requested() && ZOldPreemptionStressDelay == 0)) return;
-+  // Publish both generations' stacks. Preserve the bitmap and C++ task frame.
-+  if (in_sts) ZHeap::heap()->mark_flush(Thread::current());
-+  SuspendibleThreadSetLeaver sts_leaver(in_sts);
-+  ZLocker<ZConditionLock> locker(_lock);
-+  if (!_requested && ZOldPreemptionStressDelay != 0 && Thread::current()->is_Worker_thread()) {
-+    _lock->wait(ZOldPreemptionStressDelay);
-+  }
-+  if (!_requested) return;
-+  _running--;
-+  log_trace(gc, preempt)("Old cycle=%u phase=%s parked thread=" PTR_FORMAT " at=%.6f",
-+                        _cycle, _phase, p2i(Thread::current()), os::elapsedTime());
-+  if (_running == 0) _lock->notify_all();
-+  while (_requested) _lock->wait();
-+  const bool first_running = _running == 0;
-+  _running++;
-+  if (_active && first_running && _run_window_pending) {
-+    const double now = os::elapsedTime();
-+    _run_window_pending = false;
-+    _preemption_allowed_at = now + (double)ZOldPreemptionMinRunMillis / 1000.0;
-+    log_debug(gc, preempt)("Old cycle=%u phase=%s run-window started at=%.6f min=%zums eligible=%.6f",
-+                           _cycle, _phase, now, (size_t)ZOldPreemptionMinRunMillis,
-+                           _preemption_allowed_at);
-+    _lock->notify_all();
-+  }
-+  log_trace(gc, preempt)("Old cycle=%u phase=%s resumed thread=" PTR_FORMAT " at=%.6f",
-+                        _cycle, _phase, p2i(Thread::current()), os::elapsedTime());
-+}
-+void ZOldPreemption::mark_progress(size_t entries) {
-+  if (_joined) Atomic::add(&_mark_entries, uint64_t(entries), memory_order_relaxed);
-+}
-+void ZOldPreemption::relocate_progress() {
-+  if (ZOldGCPreemption) Atomic::add(&_relocated_pages, uint64_t(1), memory_order_relaxed);
-+}
-+void ZOldPreemption::request() {
-+  if (!ZOldGCPreemption) return;
-+  {
-+    ZLocker<ZConditionLock> locker(_lock);
-+    const uintx min_run_millis = ZOldPreemptionMinRunMillis;
-+    while (_active && min_run_millis != 0) {
-+      if (_run_window_pending) {
-+        log_trace(gc, preempt)("Old cycle=%u phase=%s preemption waits for Old to resume", _cycle, _phase);
-+        _lock->wait();
-+        continue;
-+      }
-+
-+      const double remaining = _preemption_allowed_at - os::elapsedTime();
-+      if (remaining <= 0) break;
-+
-+      const uint64_t wait_millis = MAX2<uint64_t>(1, (uint64_t)(remaining * 1000.0));
-+      log_trace(gc, preempt)("Old cycle=%u phase=%s preemption delayed %.3fms by min-run=%zums",
-+                             _cycle, _phase, remaining * 1000.0, (size_t)min_run_millis);
-+      _lock->wait(wait_millis);
-+    }
-+    assert(!_requested, "Only the Minor driver requests preemption");
-+    Atomic::store(&_requested, true);
-+    _request++;
-+    _requested_at = os::elapsedTime();
-+    log_debug(gc, preempt)("request=" UINT64_FORMAT " Old cycle=%u phase=%s requested at=%.6f running=%u",
-+                          _request, _cycle, _phase, _requested_at, _running);
-+    _lock->notify_all();
-+    while (_running != 0) _lock->wait();
-+  }
-+  // Outside the coordinator lock. In-flight pages must finish; queued
-+  // retainers must still be serviced to avoid blocking a safepoint or Young.
-+  ZGeneration::old()->synchronize_relocation();
-+  {
-+    ZLocker<ZConditionLock> locker(_lock);
-+    _parked_at = os::elapsedTime();
-+    _pauses++;
-+    log_debug(gc, preempt)("request=" UINT64_FORMAT " Old cycle=%u phase=%s all-parked at=%.6f wait=%.3fms epoch=%u mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
-+                          _request, _cycle, _phase, _parked_at, (_parked_at - _requested_at) * 1000,
-+                          ZGeneration::old()->seqnum(), Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
-+  }
-+}
-+void ZOldPreemption::resume() {
-+  if (!ZOldGCPreemption) return;
-+  ZGeneration::old()->desynchronize_relocation();
-+  ZLocker<ZConditionLock> locker(_lock);
-+  const double duration = os::elapsedTime() - _parked_at;
-+  _paused_seconds += duration;
-+  log_debug(gc, preempt)("request=" UINT64_FORMAT " Old cycle=%u phase=%s resume pause=%.3fms epoch=%u mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
-+                        _request, _cycle, _phase, duration * 1000, ZGeneration::old()->seqnum(),
-+                        Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
-+  _run_window_pending = _active;
-+  _preemption_allowed_at = 0;
-+  Atomic::store(&_requested, false);
-+  _lock->notify_all();
-+}
-+void ZOldPreemption::minor_start() {
-+  if (ZOldGCPreemption) log_debug(gc, preempt)("request=" UINT64_FORMAT " Minor start", _request);
-+}
-+void ZOldPreemption::minor_end() {
-+  if (ZOldGCPreemption) log_debug(gc, preempt)("request=" UINT64_FORMAT " Minor end", _request);
-+}
-diff --git a/src/hotspot/share/gc/z/zOldPreemption.hpp b/src/hotspot/share/gc/z/zOldPreemption.hpp
-new file mode 100644
-index 0000000000000000000000000000000000000000..677af28f30a7234f895a7308af7923ee05d54b50
---- /dev/null
-+++ b/src/hotspot/share/gc/z/zOldPreemption.hpp
-@@ -0,0 +1,89 @@
-+/*
-+ * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
-+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
-+ *
-+ * This code is free software; you can redistribute it and/or modify it
-+ * under the terms of the GNU General Public License version 2 only, as
-+ * published by the Free Software Foundation.
-+ *
-+ * This code is distributed in the hope that it will be useful, but WITHOUT
-+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
-+ * version 2 for more details (a copy is included in the LICENSE file that
-+ * accompanied this code).
-+ *
-+ * You should have received a copy of the GNU General Public License version
-+ * 2 along with this work; if not, write to the Free Software Foundation,
-+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
-+ *
-+ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
-+ * or visit www.oracle.com if you need additional information or have any
-+ * questions.
-+ */
-+
-+#ifndef SHARE_GC_Z_ZOLDPREEMPTION_HPP
-+#define SHARE_GC_Z_ZOLDPREEMPTION_HPP
-+#include "gc/z/zLock.hpp"
-+#include "memory/allocation.hpp"
-+#include "utilities/globalDefinitions.hpp"
-+
-+// Old-local participation, independent of STS. Only audited tasks participate.
-+class ZOldPreemption : public AllStatic {
-+  static ZConditionLock* _lock;
-+  static volatile bool _requested;
-+  static THREAD_LOCAL bool _joined;
-+  static uint _running;
-+  static bool _active;
-+  static uint _cycle;
-+  static uint64_t _request;
-+  static uint64_t _pauses;
-+  static volatile uint64_t _mark_entries;
-+  static volatile uint64_t _relocated_pages;
-+  static const char* _phase;
-+  static double _requested_at;
-+  static double _parked_at;
-+  static double _paused_seconds;
-+  static bool _run_window_pending;
-+  static double _preemption_allowed_at;
-+public:
-+  static void initialize();
-+  static bool joined();
-+  static bool requested();
-+  static void join();
-+  static void leave();
-+  static void start();
-+  static void end();
-+  static void phase(const char* name, bool poll = true);
-+  static void poll(bool in_sts);
-+  static void mark_progress(size_t entries);
-+  static void relocate_progress();
-+  static void request();
-+  static void resume();
-+  static void minor_start();
-+  static void minor_end();
-+};
-+class ZOldPreemptionJoiner : public StackObj {
-+  bool _active;
-+public:
-+  ZOldPreemptionJoiner(bool active) : _active(active) { if (_active) ZOldPreemption::join(); }
-+  ~ZOldPreemptionJoiner() { if (_active) ZOldPreemption::leave(); }
-+};
-+// Destroy after releasing any inner lock, before rejoining an outer STS leaver.
-+class ZOldPreemptionLeaver : public StackObj {
-+  bool _active;
-+public:
-+  ZOldPreemptionLeaver() : _active(ZOldPreemption::joined()) { if (_active) ZOldPreemption::leave(); }
-+  ~ZOldPreemptionLeaver() { if (_active) ZOldPreemption::join(); }
-+};
-+class ZOldPreemptionCycle : public StackObj {
-+public:
-+  ZOldPreemptionCycle() { ZOldPreemption::start(); }
-+  ~ZOldPreemptionCycle() { ZOldPreemption::end(); }
-+};
-+// Construct BEFORE DriverLocker, so resume follows driver unlock.
-+class ZOldPreemptionRequest : public StackObj {
-+public:
-+  ZOldPreemptionRequest() { ZOldPreemption::request(); }
-+  ~ZOldPreemptionRequest() { ZOldPreemption::resume(); }
-+};
-+#endif // SHARE_GC_Z_ZOLDPREEMPTION_HPP
-diff --git a/src/hotspot/share/gc/z/zPage.cpp b/src/hotspot/share/gc/z/zPage.cpp
-index 80e10dc75ec641b022bc08f3c7c0a3e8e55ae5d3..4c698e09826d9f1c07f114357c9b046779bd8745 100644
---- a/src/hotspot/share/gc/z/zPage.cpp
-+++ b/src/hotspot/share/gc/z/zPage.cpp
-@@ -27,6 +27,7 @@
- #include "gc/z/zPage.inline.hpp"
- #include "gc/z/zPageAge.hpp"
- #include "gc/z/zRememberedSet.inline.hpp"
-+#include "runtime/atomic.hpp"
- #include "utilities/align.hpp"
- #include "utilities/debug.hpp"
- 
-@@ -34,6 +35,7 @@ ZPage::ZPage(ZPageType type, ZPageAge age, const ZVirtualMemory& vmem, ZMultiPar
-   : _type(type),
-     _generation_id(/* set in reset */),
-     _age(/* set in reset */),
-+    _young_age(/* set in reset */),
-     _seqnum(/* set in reset */),
-     _seqnum_other(/* set in reset */),
-     _single_partition_id(partition_id),
-@@ -92,7 +94,13 @@ void ZPage::remset_alloc() {
- }
- 
- ZPage* ZPage::reset(ZPageAge age) {
-+  const uint32_t young_age = age == ZPageAge::old ? 0u : static_cast<uint32_t>(age);
-+  return reset(age, young_age);
-+}
-+
-+ZPage* ZPage::reset(ZPageAge age, uint32_t young_age) {
-   _age = age;
-+  Atomic::store(&_young_age, age == ZPageAge::old ? 0u : young_age);
- 
-   _generation_id = age == ZPageAge::old
-       ? ZGenerationId::old
-@@ -103,6 +111,24 @@ ZPage* ZPage::reset(ZPageAge age) {
-   return this;
- }
- 
-+void ZPage::set_young_age(uint32_t young_age) {
-+  assert(is_young(), "Only young pages have a young age");
-+  Atomic::store(&_young_age, young_age);
-+}
-+
-+void ZPage::merge_young_age(uint32_t young_age) {
-+  assert(is_young(), "Only young pages have a young age");
-+
-+  uint32_t current = Atomic::load(&_young_age);
-+  while (young_age < current) {
-+    const uint32_t observed = Atomic::cmpxchg(&_young_age, current, young_age, memory_order_relaxed);
-+    if (observed == current) {
-+      return;
-+    }
-+    current = observed;
-+  }
-+}
-+
- void ZPage::reset_livemap() {
-   _livemap.reset();
- }
-diff --git a/src/hotspot/share/gc/z/zPage.hpp b/src/hotspot/share/gc/z/zPage.hpp
-index 96900a376803d12cc3741d79ee379e8b7851096c..ba56a04f95856a3386899e4c5bcc200c43ab7ad6 100644
---- a/src/hotspot/share/gc/z/zPage.hpp
-+++ b/src/hotspot/share/gc/z/zPage.hpp
-@@ -44,6 +44,7 @@ private:
-   const ZPageType               _type;
-   ZGenerationId                 _generation_id;
-   ZPageAge                      _age;
-+  volatile uint32_t             _young_age;
-   uint32_t                      _seqnum;
-   uint32_t                      _seqnum_other;
-   const uint32_t                _single_partition_id;
-@@ -102,12 +103,16 @@ public:
-   ZMultiPartitionTracker* multi_partition_tracker() const;
- 
-   ZPageAge age() const;
-+  uint32_t young_age() const;
-+  void set_young_age(uint32_t young_age);
-+  void merge_young_age(uint32_t young_age);
- 
-   uint32_t seqnum() const;
-   bool is_allocating() const;
-   bool is_relocatable() const;
- 
-   ZPage* reset(ZPageAge age);
-+  ZPage* reset(ZPageAge age, uint32_t young_age);
-   void reset_livemap();
-   void reset_top_for_allocation();
- 
-diff --git a/src/hotspot/share/gc/z/zPage.inline.hpp b/src/hotspot/share/gc/z/zPage.inline.hpp
-index f6c2029ac06d49c4059087ca520e521078b0f4ec..cde885ef7d6263dce4840f235d070c5cbcf82313 100644
---- a/src/hotspot/share/gc/z/zPage.inline.hpp
-+++ b/src/hotspot/share/gc/z/zPage.inline.hpp
-@@ -172,6 +172,10 @@ inline ZPageAge ZPage::age() const {
-   return _age;
- }
- 
-+inline uint32_t ZPage::young_age() const {
-+  return Atomic::load(&_young_age);
-+}
-+
- inline uint32_t ZPage::seqnum() const {
-   return _seqnum;
- }
-diff --git a/src/hotspot/share/gc/z/zReferenceProcessor.cpp b/src/hotspot/share/gc/z/zReferenceProcessor.cpp
-index 1af4deaec03395908c18ac3137b535ceac31fc12..1ea2ee311ef5da41982d6c672317f333a9361a44 100644
---- a/src/hotspot/share/gc/z/zReferenceProcessor.cpp
-+++ b/src/hotspot/share/gc/z/zReferenceProcessor.cpp
-@@ -31,6 +31,7 @@
- #include "gc/z/zReferenceProcessor.hpp"
- #include "gc/z/zStat.hpp"
- #include "gc/z/zTask.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "gc/z/zTracer.inline.hpp"
- #include "gc/z/zValue.inline.hpp"
- #include "memory/universe.hpp"
-@@ -309,6 +310,7 @@ void ZReferenceProcessor::process_worker_discovered_list(zaddress discovered_lis
-     }
- 
-     reference = next;
-+    ZOldPreemption::poll(true);
-     SuspendibleThreadSet::yield();
-   }
- 
-@@ -432,7 +434,7 @@ private:
- 
- public:
-   ZReferenceProcessorTask(ZReferenceProcessor* reference_processor)
--    : ZTask("ZReferenceProcessorTask"),
-+    : ZTask("ZReferenceProcessorTask", ZOldTaskMode::cooperative),
-       _reference_processor(reference_processor) {}
- 
-   virtual void work() {
-@@ -476,6 +478,7 @@ void ZReferenceProcessor::verify_pending_references() {
-       assert(ZPointer::is_marked_any_old(ZBarrier::load_atomic(referent_addr)), "invariant");
-     }
- 
-+    ZOldPreemption::poll(true);
-     SuspendibleThreadSet::yield();
-   }
- #endif
-diff --git a/src/hotspot/share/gc/z/zRelocate.cpp b/src/hotspot/share/gc/z/zRelocate.cpp
-index df2dd8a01cb10762a52cb9af7f38cb1a05b8b6ac..67a252a4925ff8cdd552e5408a58960ffc6d9043 100644
---- a/src/hotspot/share/gc/z/zRelocate.cpp
-+++ b/src/hotspot/share/gc/z/zRelocate.cpp
-@@ -36,6 +36,7 @@
- #include "gc/z/zPage.inline.hpp"
- #include "gc/z/zPageAge.hpp"
- #include "gc/z/zRelocate.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "gc/z/zRelocationSet.inline.hpp"
- #include "gc/z/zRootsIterator.hpp"
- #include "gc/z/zStackWatermark.hpp"
-@@ -52,12 +53,13 @@
- static const ZStatCriticalPhase ZCriticalPhaseRelocationStall("Relocation Stall");
- static const ZStatSubPhase ZSubPhaseConcurrentRelocateRememberedSetFlipPromotedYoung("Concurrent Relocate Remset FP", ZGenerationId::young);
- 
--ZRelocateQueue::ZRelocateQueue()
-+ZRelocateQueue::ZRelocateQueue(bool is_old)
-   : _lock(),
-     _queue(),
-     _nworkers(0),
-     _nsynchronized(0),
--    _synchronize(false),
-+    _synchronize(0),
-+    _is_old(is_old),
-     _is_active(false),
-     _needs_attention(0) {}
- 
-@@ -116,7 +118,7 @@ void ZRelocateQueue::leave() {
- 
-   assert(_nsynchronized <= _nworkers, "_nsynchronized: %u _nworkers: %u", _nsynchronized, _nworkers);
- 
--  log_debug(gc, reloc)("Leaving workers: left: %u _synchronize: %d _nsynchronized: %u", _nworkers, _synchronize, _nsynchronized);
-+  log_debug(gc, reloc)("Leaving workers: left: %u _synchronize: %u _nsynchronized: %u", _nworkers, _synchronize, _nsynchronized);
- 
-   // Prune done forwardings
-   const bool forwardings_done = prune();
-@@ -206,6 +208,9 @@ public:
- 
- void ZRelocateQueue::synchronize_thread() {
-   _nsynchronized++;
-+  if (_is_old && ZOldPreemption::requested()) {
-+    log_trace(gc, preempt)("Old relocation parked worker=%u", WorkerThread::worker_id());
-+  }
- 
-   log_debug(gc, reloc)("Synchronize worker _nsynchronized %u", _nsynchronized);
- 
-@@ -218,6 +223,9 @@ void ZRelocateQueue::synchronize_thread() {
- 
- void ZRelocateQueue::desynchronize_thread() {
-   _nsynchronized--;
-+  if (_is_old && ZOldPreemption::requested()) {
-+    log_trace(gc, preempt)("Old relocation leaving park worker=%u (queued retainer)", WorkerThread::worker_id());
-+  }
- 
-   log_debug(gc, reloc)("Desynchronize worker _nsynchronized %u", _nsynchronized);
- 
-@@ -225,6 +233,10 @@ void ZRelocateQueue::desynchronize_thread() {
- }
- 
- ZForwarding* ZRelocateQueue::synchronize_poll() {
-+  if (_is_old && ZOldPreemptionStressDelay != 0) {
-+    ZLocker<ZConditionLock> locker(&_lock);
-+    if (_synchronize == 0) _lock.wait(ZOldPreemptionStressDelay);
-+  }
-   // Fast path avoids locking
-   if (!needs_attention()) {
-     return nullptr;
-@@ -279,9 +291,8 @@ void ZRelocateQueue::clear() {
- 
- void ZRelocateQueue::synchronize() {
-   ZLocker<ZConditionLock> locker(&_lock);
--  _synchronize = true;
--
--  inc_needs_attention();
-+  if (_synchronize++ == 0) inc_needs_attention();
-+  _lock.notify_all();
- 
-   log_debug(gc, reloc)("Synchronize all workers 1 _nworkers: %u _nsynchronized: %u", _nworkers, _nsynchronized);
- 
-@@ -293,7 +304,8 @@ void ZRelocateQueue::synchronize() {
- 
- void ZRelocateQueue::desynchronize() {
-   ZLocker<ZConditionLock> locker(&_lock);
--  _synchronize = false;
-+  assert(_synchronize > 0, "Unbalanced relocation hold");
-+  if (--_synchronize != 0) return;
- 
-   log_debug(gc, reloc)("Desynchronize all workers _nworkers: %u _nsynchronized: %u", _nworkers, _nsynchronized);
- 
-@@ -306,7 +318,7 @@ void ZRelocateQueue::desynchronize() {
- 
- ZRelocate::ZRelocate(ZGeneration* generation)
-   : _generation(generation),
--    _queue() {}
-+    _queue(generation->is_old()) {}
- 
- ZWorkers* ZRelocate::workers() const {
-   return _generation->workers();
-@@ -385,7 +397,7 @@ zaddress ZRelocate::forward_object(ZForwarding* forwarding, zaddress_unsafe from
-   return to_addr;
- }
- 
--static ZPage* alloc_page(ZAllocatorForRelocation* allocator, ZPageType type, size_t size) {
-+static ZPage* alloc_page(ZAllocatorForRelocation* allocator, ZPageType type, size_t size, uint32_t young_age) {
-   if (ZStressRelocateInPlace) {
-     // Simulate failure to allocate a new page. This will
-     // cause the page being relocated to be relocated in-place.
-@@ -396,7 +408,12 @@ static ZPage* alloc_page(ZAllocatorForRelocation* allocator, ZPageType type, siz
-   flags.set_non_blocking();
-   flags.set_gc_relocation();
- 
--  return allocator->alloc_page_for_relocation(type, size, flags);
-+  ZPage* const page = allocator->alloc_page_for_relocation(type, size, flags);
-+  if (page != nullptr && page->is_young()) {
-+    page->set_young_age(young_age);
-+  }
-+
-+  return page;
- }
- 
- static void retire_target_page(ZGeneration* generation, ZPage* page) {
-@@ -427,7 +444,7 @@ public:
- 
-   ZPage* alloc_and_retire_target_page(ZForwarding* forwarding, ZPage* target) {
-     ZAllocatorForRelocation* const allocator = ZAllocator::relocation(forwarding->to_age());
--    ZPage* const page = alloc_page(allocator, forwarding->type(), forwarding->size());
-+    ZPage* const page = alloc_page(allocator, forwarding->type(), forwarding->size(), forwarding->to_young_age());
-     if (page == nullptr) {
-       Atomic::inc(&_in_place_count);
-     }
-@@ -510,7 +527,7 @@ public:
-     const ZPageAge to_age = forwarding->to_age();
-     if (shared(to_age) == target) {
-       ZAllocatorForRelocation* const allocator = ZAllocator::relocation(forwarding->to_age());
--      ZPage* const to_page = alloc_page(allocator, forwarding->type(), forwarding->size());
-+      ZPage* const to_page = alloc_page(allocator, forwarding->type(), forwarding->size(), forwarding->to_young_age());
-       set_shared(to_age, to_page);
-       if (to_page == nullptr) {
-         Atomic::inc(&_in_place_count);
-@@ -855,7 +872,7 @@ private:
-     // Promotions happen through a new cloned page
-     ZPage* const to_page = promotion
-         ? from_page->clone_for_promotion()
--        : from_page->reset(to_age);
-+        : from_page->reset(to_age, _forwarding->to_young_age());
- 
-     // Reset page for in-place relocation
-     to_page->reset_top_for_allocation();
-@@ -893,6 +910,9 @@ private:
-       // in-place.
-       const ZPageAge to_age = _forwarding->to_age();
-       ZPage* to_page = _allocator->alloc_and_retire_target_page(_forwarding, target(to_age));
-+      if (to_page != nullptr && to_page->is_young()) {
-+        to_page->merge_young_age(_forwarding->to_young_age());
-+      }
-       set_target(to_age, to_page);
-       if (to_page != nullptr) {
-         continue;
-@@ -971,6 +991,11 @@ public:
-   void do_forwarding(ZForwarding* forwarding) {
-     _forwarding = forwarding;
- 
-+    ZPage* const to_page = target(_forwarding->to_age());
-+    if (to_page != nullptr && to_page->is_young()) {
-+      to_page->merge_young_age(_forwarding->to_young_age());
-+    }
-+
-     _forwarding->page()->log_msg(" (relocate page)");
- 
-     ZVerify::before_relocation(_forwarding);
-@@ -1064,7 +1089,7 @@ private:
- 
- public:
-   ZRelocateTask(ZRelocationSet* relocation_set, ZRelocateQueue* queue)
--    : ZRestartableTask("ZRelocateTask"),
-+    : ZRestartableTask("ZRelocateTask", ZOldTaskMode::relocation),
-       _iter(relocation_set),
-       _generation(relocation_set->generation()),
-       _queue(queue),
-@@ -1098,6 +1123,7 @@ public:
-       // After the mark_done call a safepointing could be completed and a
-       // new GC phase could be entered.
-       forwarding->mark_done();
-+      if (_generation->is_old()) ZOldPreemption::relocate_progress();
-     };
- 
-     const auto claim_and_do_forwarding = [&](ZForwarding* forwarding) {
-@@ -1227,17 +1253,54 @@ void ZRelocate::relocate(ZRelocationSet* relocation_set) {
-   }
- }
- 
--ZPageAge ZRelocate::compute_to_age(ZPageAge from_age) {
-+ZPageAge ZRelocate::compute_to_age(const ZPage* from_page, uint32_t* to_young_age) {
-+  const ZPageAge from_age = from_page->age();
-   if (from_age == ZPageAge::old) {
-+    if (to_young_age != nullptr) {
-+      *to_young_age = 0;
-+    }
-     return ZPageAge::old;
-   }
- 
--  const uint age = static_cast<uint>(from_age);
--  if (age >= ZGeneration::young()->tenuring_threshold()) {
-+  const uint threshold = ZGeneration::young()->tenuring_threshold();
-+  const uint category_age = static_cast<uint>(from_age);
-+
-+  // Preserve the exact upstream semantics for all original thresholds. The
-+  // value 15 is the old-generation sentinel in ZPageAge, so survivor14 moves
-+  // directly to old when the threshold is 15.
-+  if (threshold <= static_cast<uint>(ZPageAge::old)) {
-+    if (category_age >= threshold) {
-+      if (to_young_age != nullptr) {
-+        *to_young_age = 0;
-+      }
-+      return ZPageAge::old;
-+    }
-+
-+    const ZPageAge to_age = static_cast<ZPageAge>(category_age + 1);
-+    if (to_young_age != nullptr) {
-+      *to_young_age = to_age == ZPageAge::old ? 0 : from_page->young_age() + 1;
-+    }
-+    return to_age;
-+  }
-+
-+  // Extended thresholds keep using survivor14 as the physical ZGC age bucket,
-+  // while the page carries the real number of survived young collections.
-+  const uint32_t from_young_age = from_page->young_age();
-+  if (from_young_age >= threshold - 1u) {
-+    if (to_young_age != nullptr) {
-+      *to_young_age = 0;
-+    }
-     return ZPageAge::old;
-   }
- 
--  return static_cast<ZPageAge>(age + 1);
-+  const uint32_t next_young_age = from_young_age + 1u;
-+  if (to_young_age != nullptr) {
-+    *to_young_age = next_young_age;
-+  }
-+
-+  return next_young_age <= static_cast<uint32_t>(ZPageAge::survivor14)
-+      ? static_cast<ZPageAge>(next_young_age)
-+      : ZPageAge::survivor14;
- }
- 
- class ZFlipAgePagesTask : public ZTask {
-@@ -1255,7 +1318,8 @@ public:
- 
-     for (ZPage* prev_page; _iter.next(&prev_page);) {
-       const ZPageAge from_age = prev_page->age();
--      const ZPageAge to_age = ZRelocate::compute_to_age(from_age);
-+      uint32_t to_young_age;
-+      const ZPageAge to_age = ZRelocate::compute_to_age(prev_page, &to_young_age);
-       assert(from_age != ZPageAge::old, "invalid age for a young collection");
- 
-       // Figure out if this is proper promotion
-@@ -1277,7 +1341,7 @@ public:
-       // Setup to-space page
-       ZPage* const new_page = promotion
-           ? prev_page->clone_for_promotion()
--          : prev_page->reset(to_age);
-+          : prev_page->reset(to_age, to_young_age);
- 
-       // Reset page for flip aging
-       new_page->reset_livemap();
-diff --git a/src/hotspot/share/gc/z/zRelocate.hpp b/src/hotspot/share/gc/z/zRelocate.hpp
-index 400fc61b055a092e55facf80a042cc8cc3b32781..296fa1b070b4275944703dcdd479007f9b2cdb13 100644
---- a/src/hotspot/share/gc/z/zRelocate.hpp
-+++ b/src/hotspot/share/gc/z/zRelocate.hpp
-@@ -30,6 +30,7 @@
- 
- class ZForwarding;
- class ZGeneration;
-+class ZPage;
- class ZWorkers;
- 
- typedef size_t ZForwardingCursor;
-@@ -40,7 +41,8 @@ private:
-   ZArray<ZForwarding*> _queue;
-   uint                 _nworkers;
-   uint                 _nsynchronized;
--  bool                 _synchronize;
-+  uint                 _synchronize; // Nested safepoint / preemption holds
-+  const bool           _is_old;
-   volatile bool        _is_active;
-   volatile int         _needs_attention;
- 
-@@ -52,7 +54,7 @@ private:
-   ZForwarding* prune_and_claim();
- 
- public:
--  ZRelocateQueue();
-+  ZRelocateQueue(bool is_old);
- 
-   void activate(uint nworkers);
-   void deactivate();
-@@ -91,7 +93,7 @@ public:
- 
-   static void add_remset(volatile zpointer* p);
- 
--  static ZPageAge compute_to_age(ZPageAge from_age);
-+  static ZPageAge compute_to_age(const ZPage* from_page, uint32_t* to_young_age = nullptr);
- 
-   zaddress relocate_object(ZForwarding* forwarding, zaddress_unsafe from_addr);
-   zaddress forward_object(ZForwarding* forwarding, zaddress_unsafe from_addr);
-diff --git a/src/hotspot/share/gc/z/zRelocationSet.cpp b/src/hotspot/share/gc/z/zRelocationSet.cpp
-index 8cc7bceb8e8498b23505cc4112d197fdfe7746ee..b0eca9110a0b227879c67fa7bfff4e3ed0fa00f2 100644
---- a/src/hotspot/share/gc/z/zRelocationSet.cpp
-+++ b/src/hotspot/share/gc/z/zRelocationSet.cpp
-@@ -32,6 +32,7 @@
- #include "gc/z/zRelocationSetSelector.inline.hpp"
- #include "gc/z/zStat.hpp"
- #include "gc/z/zTask.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "gc/z/zWorkers.hpp"
- #include "runtime/atomic.hpp"
- #include "utilities/debug.hpp"
-@@ -74,13 +75,9 @@ private:
-     install(forwarding, index);
-   }
- 
--  ZPageAge to_age(ZPage* page) {
--    return ZRelocate::compute_to_age(page->age());
--  }
--
- public:
-   ZRelocationSetInstallTask(ZForwardingAllocator* allocator, const ZRelocationSetSelector* selector)
--    : ZTask("ZRelocationSetInstallTask"),
-+    : ZTask("ZRelocationSetInstallTask", ZOldTaskMode::cooperative),
-       _allocator(allocator),
-       _forwardings(nullptr),
-       _nforwardings((size_t)selector->selected_small()->length() + (size_t)selector->selected_medium()->length()),
-@@ -111,18 +108,24 @@ public:
-     // Allocate and install forwardings for small pages
-     for (size_t page_index; _small_iter.next_index(&page_index);) {
-       ZPage* page = _small->at(int(page_index));
--      ZForwarding* const forwarding = ZForwarding::alloc(_allocator, page, to_age(page));
-+      uint32_t to_young_age;
-+      const ZPageAge to_age = ZRelocate::compute_to_age(page, &to_young_age);
-+      ZForwarding* const forwarding = ZForwarding::alloc(_allocator, page, to_age, to_young_age);
-       install_small(forwarding, (size_t)_medium->length() + page_index);
- 
-+      ZOldPreemption::poll(true);
-       SuspendibleThreadSet::yield();
-     }
- 
-     // Allocate and install forwardings for medium pages
-     for (size_t page_index; _medium_iter.next_index(&page_index);) {
-       ZPage* page = _medium->at(int(page_index));
--      ZForwarding* const forwarding = ZForwarding::alloc(_allocator, page, to_age(page));
-+      uint32_t to_young_age;
-+      const ZPageAge to_age = ZRelocate::compute_to_age(page, &to_young_age);
-+      ZForwarding* const forwarding = ZForwarding::alloc(_allocator, page, to_age, to_young_age);
-       install_medium(forwarding, page_index);
- 
-+      ZOldPreemption::poll(true);
-       SuspendibleThreadSet::yield();
-     }
-   }
-@@ -183,6 +186,7 @@ void ZRelocationSet::reset(ZPageAllocator* page_allocator) {
-   ZRelocationSetIterator iter(this);
-   for (ZForwarding* forwarding; iter.next(&forwarding);) {
-     forwarding->~ZForwarding();
-+    if (_generation->is_old()) ZOldPreemption::poll(false);
-   }
- 
-   _nforwardings = 0;
-diff --git a/src/hotspot/share/gc/z/zRelocationSetSelector.cpp b/src/hotspot/share/gc/z/zRelocationSetSelector.cpp
-index e9ef66a19dc41897a8fb8f11b925da2097b71cf6..a2aeb50a25d5cf5d2250b1122da9f60d38d58a5a 100644
---- a/src/hotspot/share/gc/z/zRelocationSetSelector.cpp
-+++ b/src/hotspot/share/gc/z/zRelocationSetSelector.cpp
-@@ -24,6 +24,7 @@
- #include "gc/shared/gc_globals.hpp"
- #include "gc/z/zArray.inline.hpp"
- #include "gc/z/zForwarding.inline.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "gc/z/zPage.inline.hpp"
- #include "gc/z/zRelocationSetSelector.inline.hpp"
- #include "jfr/jfrEvents.hpp"
-@@ -84,6 +85,7 @@ void ZRelocationSetSelectorGroup::semi_sort() {
-   for (ZPage* page; iter1.next(&page);) {
-     const size_t index = partition_index(page);
-     partitions[index]++;
-+    ZOldPreemption::poll(false);
-   }
- 
-   // Calculate partition fingers
-@@ -105,6 +107,7 @@ void ZRelocationSetSelectorGroup::semi_sort() {
-     const int finger = partitions[index]++;
-     assert(sorted_live_pages.at(finger) == nullptr, "Invalid finger");
-     sorted_live_pages.at_put(finger, page);
-+    ZOldPreemption::poll(false);
-   }
- 
-   _live_pages.swap(&sorted_live_pages);
-@@ -159,6 +162,7 @@ void ZRelocationSetSelectorGroup::select_inner() {
-                          _name, from, to, diff_reclaimable, from_forwarding_entries,
-                          (selected_from == from) ? "Selected" : "Rejected",
-                          int(page_live_bytes * 100 / page->size()));
-+    ZOldPreemption::poll(false);
-   }
- 
-   // Finalize selection
-@@ -167,6 +171,7 @@ void ZRelocationSetSelectorGroup::select_inner() {
-     if (page->is_young()) {
-       _not_selected_pages.append(page);
-     }
-+    ZOldPreemption::poll(false);
-   }
-   _live_pages.trunc_to(selected_from);
-   _forwarding_entries = selected_forwarding_entries;
-@@ -196,6 +201,7 @@ void ZRelocationSetSelectorGroup::select() {
-     for (int from = 1; from <= npages; from++) {
-       ZPage* const page = _live_pages.at(from - 1);
-       _not_selected_pages.append(page);
-+      ZOldPreemption::poll(false);
-     }
-   }
- 
-diff --git a/src/hotspot/share/gc/z/zTask.cpp b/src/hotspot/share/gc/z/zTask.cpp
-index 208a20c1914a6e33979b8cc268259f25126e0346..d662e74947a3d45ff2e7f93ef6187bc3025e4652 100644
---- a/src/hotspot/share/gc/z/zTask.cpp
-+++ b/src/hotspot/share/gc/z/zTask.cpp
-@@ -31,8 +31,8 @@ void ZTask::Task::work(uint worker_id) {
-   _task->work();
- }
- 
--ZTask::ZTask(const char* name)
--  : _worker_task(this, name) {}
-+ZTask::ZTask(const char* name, ZOldTaskMode old_mode)
-+  : _worker_task(this, name), _old_mode(old_mode) {}
- 
- const char* ZTask::name() const {
-   return _worker_task.name();
-@@ -42,7 +42,7 @@ WorkerTask* ZTask::worker_task() {
-   return &_worker_task;
- }
- 
--ZRestartableTask::ZRestartableTask(const char* name)
--  : ZTask(name) {}
-+ZRestartableTask::ZRestartableTask(const char* name, ZOldTaskMode old_mode)
-+  : ZTask(name, old_mode) {}
- 
- void ZRestartableTask::resize_workers(uint nworkers) {}
-diff --git a/src/hotspot/share/gc/z/zTask.hpp b/src/hotspot/share/gc/z/zTask.hpp
-index 37733f8873a45ea854fbb801b6863e9654103b5c..5ea9b3da4c9d40c05df345c1c60d6e222ce08bbc 100644
---- a/src/hotspot/share/gc/z/zTask.hpp
-+++ b/src/hotspot/share/gc/z/zTask.hpp
-@@ -27,6 +27,8 @@
- #include "gc/shared/workerThread.hpp"
- #include "memory/allocation.hpp"
- 
-+enum class ZOldTaskMode { serial, cooperative, relocation };
-+
- class ZTask : public StackObj {
- private:
-   class Task : public WorkerTask {
-@@ -40,9 +42,11 @@ private:
-   };
- 
-   Task _worker_task;
-+  const ZOldTaskMode _old_mode;
- 
- public:
--  ZTask(const char* name);
-+  ZTask(const char* name, ZOldTaskMode old_mode = ZOldTaskMode::serial);
-+  ZOldTaskMode old_mode() const { return _old_mode; }
- 
-   const char* name() const;
-   WorkerTask* worker_task();
-@@ -52,7 +56,7 @@ public:
- 
- class ZRestartableTask : public ZTask {
- public:
--  ZRestartableTask(const char* name);
-+  ZRestartableTask(const char* name, ZOldTaskMode old_mode = ZOldTaskMode::serial);
-   virtual void resize_workers(uint nworkers);
- };
- 
-diff --git a/src/hotspot/share/gc/z/zUnload.cpp b/src/hotspot/share/gc/z/zUnload.cpp
-index 3dc7ecd3edc418288f1816a183c247b3ce5b864c..1858e36249921df0e5f2a24734ef4c2904e135d8 100644
---- a/src/hotspot/share/gc/z/zUnload.cpp
-+++ b/src/hotspot/share/gc/z/zUnload.cpp
-@@ -33,15 +33,30 @@
- #include "gc/z/zGeneration.inline.hpp"
- #include "gc/z/zLock.inline.hpp"
- #include "gc/z/zNMethod.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "gc/z/zStat.hpp"
- #include "gc/z/zUncoloredRoot.inline.hpp"
- #include "gc/z/zUnload.hpp"
-+#include "logging/log.hpp"
- #include "memory/metaspaceUtils.hpp"
- #include "oops/access.inline.hpp"
-+#include "runtime/os.hpp"
- 
- static const ZStatSubPhase ZSubPhaseConcurrentClassesUnlink("Concurrent Classes Unlink", ZGenerationId::old);
- static const ZStatSubPhase ZSubPhaseConcurrentClassesPurge("Concurrent Classes Purge", ZGenerationId::old);
- 
-+static double elapsed_ms(double start) {
-+  return (os::elapsedTime() - start) * 1000.0;
-+}
-+
-+static void old_preemption_poll_in_sts() {
-+  ZOldPreemption::poll(true);
-+}
-+
-+static void log_unload_subphase(const char* operation, const char* subphase, double duration_ms) {
-+  log_debug(gc, preempt)("Old %s subphase=%s duration=%.3fms", operation, subphase, duration_ms);
-+}
-+
- class ZIsUnloadingOopClosure : public OopClosure {
- private:
-   const uintptr_t _color;
-@@ -140,15 +155,41 @@ void ZUnload::unlink() {
-   ZStatTimerOld timer(ZSubPhaseConcurrentClassesUnlink);
-   SuspendibleThreadSetJoiner sts_joiner;
-   bool unloading_occurred;
-+  double active_ms = 0.0;
- 
-+  double start = os::elapsedTime();
-   {
-     MutexLocker ml(ClassLoaderDataGraph_lock);
-     unloading_occurred = SystemDictionary::do_unloading(ZGeneration::old()->gc_timer());
-   }
--
--  Klass::clean_weak_klass_links(unloading_occurred);
-+  double duration = elapsed_ms(start);
-+  active_ms += duration;
-+  log_unload_subphase("Class Unlink", "SystemDictionary", duration);
-+  ZOldPreemption::poll(true);
-+
-+  start = os::elapsedTime();
-+  Klass::clean_weak_klass_links(unloading_occurred,
-+                                true /* clean_alive_klasses */,
-+                                old_preemption_poll_in_sts);
-+  duration = elapsed_ms(start);
-+  active_ms += duration;
-+  log_unload_subphase("Class Unlink", "Klass Weak Links", duration);
-+  ZOldPreemption::poll(true);
-+
-+  start = os::elapsedTime();
-   ZNMethod::unlink(_workers, unloading_occurred);
-+  duration = elapsed_ms(start);
-+  active_ms += duration;
-+  log_unload_subphase("Class Unlink", "ZNMethod Unlink", duration);
-+  ZOldPreemption::poll(true);
-+
-+  start = os::elapsedTime();
-   DependencyContext::cleaning_end();
-+  duration = elapsed_ms(start);
-+  active_ms += duration;
-+  log_unload_subphase("Class Unlink", "Dependency Cleaning End", duration);
-+  log_debug(gc, preempt)("Old Class Unlink active=%.3fms", active_ms);
-+  ZOldPreemption::poll(true);
- }
- 
- void ZUnload::purge() {
-@@ -158,13 +199,23 @@ void ZUnload::purge() {
- 
-   ZStatTimerOld timer(ZSubPhaseConcurrentClassesPurge);
- 
-+  double start = os::elapsedTime();
-   {
-     SuspendibleThreadSetJoiner sts_joiner;
-     ZNMethod::purge();
-   }
-+  log_unload_subphase("Class Purge", "ZNMethod Purge", elapsed_ms(start));
-+  ZOldPreemption::poll(false);
- 
-+  start = os::elapsedTime();
-   ClassLoaderDataGraph::purge(/*at_safepoint*/false);
-+  log_unload_subphase("Class Purge", "ClassLoaderDataGraph Purge", elapsed_ms(start));
-+  ZOldPreemption::poll(false);
-+
-+  start = os::elapsedTime();
-   CodeCache::purge_exception_caches();
-+  log_unload_subphase("Class Purge", "Exception Cache Purge", elapsed_ms(start));
-+  ZOldPreemption::poll(false);
- }
- 
- void ZUnload::finish() {
-diff --git a/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp b/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
-index 7373f451cea3b3555e8d5f625d3f1da7b2bbdbaf..19b1cff43068c23b0ffbd807f7c674ceeb18b9b2 100644
---- a/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
-+++ b/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
-@@ -27,6 +27,7 @@
- #include "gc/z/zHeap.inline.hpp"
- #include "gc/z/zRootsIterator.hpp"
- #include "gc/z/zTask.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "gc/z/zWeakRootsProcessor.hpp"
- #include "gc/z/zWorkers.hpp"
- #include "memory/iterator.hpp"
-@@ -37,6 +38,7 @@ class ZPhantomCleanOopClosure : public OopClosure {
- public:
-   virtual void do_oop(oop* p) {
-     ZBarrier::clean_barrier_on_phantom_oop_field((zpointer*)p);
-+    ZOldPreemption::poll(true);
-     SuspendibleThreadSet::yield();
-   }
- 
-@@ -54,7 +56,7 @@ private:
- 
- public:
-   ZProcessWeakRootsTask()
--    : ZTask("ZProcessWeakRootsTask"),
-+    : ZTask("ZProcessWeakRootsTask", ZOldTaskMode::cooperative),
-       _roots_weak_colored(ZGenerationIdOptional::old) {}
- 
-   ~ZProcessWeakRootsTask() {
-diff --git a/src/hotspot/share/gc/z/zWorkers.cpp b/src/hotspot/share/gc/z/zWorkers.cpp
-index 1e7144a0c261e8bbd1d30cf4f0be63b5ac57a8f1..34074a26e59f4c98f3cc3f194d1a91f24f3b40b7 100644
---- a/src/hotspot/share/gc/z/zWorkers.cpp
-+++ b/src/hotspot/share/gc/z/zWorkers.cpp
-@@ -28,6 +28,7 @@
- #include "gc/z/zStat.hpp"
- #include "gc/z/zTask.hpp"
- #include "gc/z/zWorkers.hpp"
-+#include "gc/z/zOldPreemption.hpp"
- #include "runtime/java.hpp"
- 
- static const char* workers_name(ZGenerationId id) {
-@@ -45,6 +46,7 @@ static uint max_nworkers(ZGenerationId id) {
- ZWorkers::ZWorkers(ZGenerationId id, ZStatWorkers* stats)
-   : _workers(workers_name(id),
-              max_nworkers(id)),
-+    _id(id),
-     _generation_name(generation_name(id)),
-     _resize_lock(),
-     _requested_nworkers(0),
-@@ -89,6 +91,15 @@ void ZWorkers::set_inactive() {
-   _is_active = false;
- }
- 
-+class ZOldPreemptibleTask : public WorkerTask {
-+  ZTask* const _task;
-+public:
-+  ZOldPreemptibleTask(ZTask* task) : WorkerTask(task->name()), _task(task) {}
-+  void work(uint worker_id) override {
-+    ZOldPreemptionJoiner joiner(_task->old_mode() == ZOldTaskMode::cooperative);
-+    _task->worker_task()->work(worker_id);
-+  }
-+};
- void ZWorkers::run(ZTask* task) {
-   log_debug(gc, task)("Executing %s using %s with %u workers", task->name(), _workers.name(), active_workers());
- 
-@@ -97,7 +108,14 @@ void ZWorkers::run(ZTask* task) {
-     _stats->at_start(active_workers());
-   }
- 
--  _workers.run_task(task->worker_task());
-+  if (_id == ZGenerationId::old && ZOldPreemption::joined() && task->old_mode() != ZOldTaskMode::serial) {
-+    if (task->old_mode() == ZOldTaskMode::relocation) ZOldPreemption::phase("Relocate", false);
-+    ZOldPreemptibleTask wrapper(task);
-+    ZOldPreemptionLeaver leaver;
-+    _workers.run_task(&wrapper);
-+  } else {
-+    _workers.run_task(task->worker_task());
-+  }
- 
-   {
-     ZLocker<ZLock> locker(&_resize_lock);
-diff --git a/src/hotspot/share/gc/z/zWorkers.hpp b/src/hotspot/share/gc/z/zWorkers.hpp
-index 8d1f415256260868f641f26c952666dd7765065b..7b98acfb47965315c2cc2d5d231924c552aeb5cf 100644
---- a/src/hotspot/share/gc/z/zWorkers.hpp
-+++ b/src/hotspot/share/gc/z/zWorkers.hpp
-@@ -38,6 +38,7 @@ class ZTask;
- class ZWorkers {
- private:
-   WorkerThreads       _workers;
-+  const ZGenerationId _id;
-   const char* const   _generation_name;
-   ZLock               _resize_lock;
-   volatile uint       _requested_nworkers;
-diff --git a/src/hotspot/share/gc/z/z_globals.hpp b/src/hotspot/share/gc/z/z_globals.hpp
-index 4e5d725a5fdec187a24a646384a6bf39f835430a..0847dcdfdabfcf7d06bf572aa4ed8eb9f642630b 100644
---- a/src/hotspot/share/gc/z/z_globals.hpp
-+++ b/src/hotspot/share/gc/z/z_globals.hpp
-@@ -75,6 +75,23 @@
-   product(bool, ZStressRelocateInPlace, false, DIAGNOSTIC,                  \
-           "Always relocate pages in-place")                                 \
-                                                                             \
-+  product(bool, ZOldGCPreemption, true, DIAGNOSTIC,                          \
-+          "Pause Old work during Minor collections")                        \
-+                                                                            \
-+  product(uintx, ZOldPreemptionMinRunMillis, 1000, MANAGEABLE,              \
-+          "Minimum Old run time after start/resume before another preemption (ms)") \
-+          range(0, max_uintx)                                                \
-+                                                                            \
-+  product(bool, ZOldGCPostMinorSoftMaxMajor, true, MANAGEABLE,             \
-+          "Enable post-Minor Major trigger based on SoftMax percentage")   \
-+                                                                            \
-+  product(uintx, ZOldGCPostMinorSoftMaxPercent, 100, MANAGEABLE,           \
-+          "Start a Major after Minor if heap used is at least this percent of SoftMax") \
-+          range(0, max_uintx)                                                \
-+                                                                            \
-+  develop(uintx, ZOldPreemptionStressDelay, 0,                                \
-+          "Interruptible delay in milliseconds at Old preemption polls")    \
-+                                                                            \
-   product(bool, ZVerifyRoots, trueInDebug, DIAGNOSTIC,                      \
-           "Verify roots")                                                   \
-                                                                             \
-@@ -111,9 +128,9 @@
-           "Always use the minimum medium page size for fast medium page "   \
-           "allocations")                                                    \
-                                                                             \
--  product(int, ZTenuringThreshold, -1, DIAGNOSTIC,                          \
-+  product(int, ZTenuringThreshold, -1, MANAGEABLE,                         \
-           "Young generation tenuring threshold, -1 for dynamic computation")\
--          range(-1, static_cast<int>(ZPageAgeMax))                          \
-+          range(-1, max_jint)                                               \
-                                                                             \
-   develop(bool, ZVerifyOops, false,                                         \
-           "Verify accessed oops")                                           \
-diff --git a/src/hotspot/share/oops/instanceKlass.cpp b/src/hotspot/share/oops/instanceKlass.cpp
-index dd15294c3cf4caab46e14b8831dacd2982ef544f..6c74a6f8eadd3c95a60b841ccc8a3b854fb65f4a 100644
---- a/src/hotspot/share/oops/instanceKlass.cpp
-+++ b/src/hotspot/share/oops/instanceKlass.cpp
-@@ -2521,9 +2521,12 @@ bool InstanceKlass::is_dependent_nmethod(nmethod* nm) {
- }
- #endif //PRODUCT
- 
--void InstanceKlass::clean_weak_instanceklass_links() {
-+void InstanceKlass::clean_weak_instanceklass_links(Klass::CleanWeakKlassLinksCallback callback) {
-   clean_implementors_list();
--  clean_method_data();
-+  if (callback != nullptr) {
-+    callback();
-+  }
-+  clean_method_data(callback);
- }
- 
- void InstanceKlass::clean_implementors_list() {
-@@ -2552,12 +2555,15 @@ void InstanceKlass::clean_implementors_list() {
-   }
- }
- 
--void InstanceKlass::clean_method_data() {
-+void InstanceKlass::clean_method_data(Klass::CleanWeakKlassLinksCallback callback) {
-   for (int m = 0; m < methods()->length(); m++) {
-     MethodData* mdo = methods()->at(m)->method_data();
-     if (mdo != nullptr) {
-       mdo->clean_method_data(/*always_clean*/false);
-     }
-+    if (callback != nullptr) {
-+      callback();
-+    }
-   }
- }
- 
-diff --git a/src/hotspot/share/oops/instanceKlass.hpp b/src/hotspot/share/oops/instanceKlass.hpp
-index e253691b3d470c2b48ee008f6dd947f5593a055e..9642d4bccac68012c9f6deac382f08ffeed8db95 100644
---- a/src/hotspot/share/oops/instanceKlass.hpp
-+++ b/src/hotspot/share/oops/instanceKlass.hpp
-@@ -962,10 +962,10 @@ public:
-   void adjust_default_methods(bool* trace_name_printed);
- #endif // INCLUDE_JVMTI
- 
--  void clean_weak_instanceklass_links();
-+  void clean_weak_instanceklass_links(Klass::CleanWeakKlassLinksCallback callback = nullptr);
-  private:
-   void clean_implementors_list();
--  void clean_method_data();
-+  void clean_method_data(Klass::CleanWeakKlassLinksCallback callback);
- 
-  public:
-   // Explicit metaspace deallocation of fields
-diff --git a/src/hotspot/share/oops/klass.cpp b/src/hotspot/share/oops/klass.cpp
-index 66e29384d86690307b6674d3663547e3a730f1cf..aa129679f628aa9a709de2bcb5c9bea16819829c 100644
---- a/src/hotspot/share/oops/klass.cpp
-+++ b/src/hotspot/share/oops/klass.cpp
-@@ -719,7 +719,9 @@ void Klass::clean_subklass() {
-   }
- }
- 
--void Klass::clean_weak_klass_links(bool unloading_occurred, bool clean_alive_klasses) {
-+void Klass::clean_weak_klass_links(bool unloading_occurred,
-+                                   bool clean_alive_klasses,
-+                                   CleanWeakKlassLinksCallback callback) {
-   if (!ClassUnloading || !unloading_occurred) {
-     return;
-   }
-@@ -750,14 +752,18 @@ void Klass::clean_weak_klass_links(bool unloading_occurred, bool clean_alive_kla
-     // Clean the implementors list and method data.
-     if (clean_alive_klasses && current->is_instance_klass()) {
-       InstanceKlass* ik = InstanceKlass::cast(current);
--      ik->clean_weak_instanceklass_links();
-+      ik->clean_weak_instanceklass_links(callback);
- 
-       // JVMTI RedefineClasses creates previous versions that are not in
-       // the class hierarchy, so process them here.
-       while ((ik = ik->previous_versions()) != nullptr) {
--        ik->clean_weak_instanceklass_links();
-+        ik->clean_weak_instanceklass_links(callback);
-       }
-     }
-+
-+    if (callback != nullptr) {
-+      callback();
-+    }
-   }
- }
- 
-diff --git a/src/hotspot/share/oops/klass.hpp b/src/hotspot/share/oops/klass.hpp
-index f32f9fe11854efce5acd38f6a8510ed3f205f079..8d23a09c7685b601c52d021ab1b42a6390a1cc07 100644
---- a/src/hotspot/share/oops/klass.hpp
-+++ b/src/hotspot/share/oops/klass.hpp
-@@ -736,7 +736,10 @@ public:
- 
-   void clean_subklass();
- 
--  static void clean_weak_klass_links(bool unloading_occurred, bool clean_alive_klasses = true);
-+  using CleanWeakKlassLinksCallback = void (*)();
-+  static void clean_weak_klass_links(bool unloading_occurred,
-+                                     bool clean_alive_klasses = true,
-+                                     CleanWeakKlassLinksCallback callback = nullptr);
-   static void clean_subklass_tree() {
-     clean_weak_klass_links(/*unloading_occurred*/ true , /* clean_alive_klasses */ false);
-   }
 diff --git a/test/hotspot/jtreg/gc/z/TestOldPreemption.java b/test/hotspot/jtreg/gc/z/TestOldPreemption.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..8b9dcac126d53eff77e28f6e97987b87f5462219
@@ -2801,3 +748,2078 @@ index 0000000000000000000000000000000000000000..8b9dcac126d53eff77e28f6e97987b87
 +        System.out.println("PREEMPTION verified pauses=" + counts + " phases=" + phases);
 +    }
 +}
+diff --git a/src/hotspot/share/classfile/systemDictionary.cpp b/src/hotspot/share/classfile/systemDictionary.cpp
+index ee526e9..37fc7f7 100644
+--- a/src/hotspot/share/classfile/systemDictionary.cpp
++++ b/src/hotspot/share/classfile/systemDictionary.cpp
+@@ -75,6 +75,7 @@
+ #include "runtime/java.hpp"
+ #include "runtime/javaCalls.hpp"
+ #include "runtime/mutexLocker.hpp"
++#include "runtime/os.hpp"
+ #include "runtime/sharedRuntime.hpp"
+ #include "runtime/signature.hpp"
+ #include "runtime/synchronizer.hpp"
+@@ -1505,26 +1506,49 @@ bool SystemDictionary::do_unloading(GCTimer* gc_timer) {
+   {
+     GCTraceTime(Debug, gc, phases) t("ClassLoaderData", gc_timer);
+     assert_locked_or_safepoint(ClassLoaderDataGraph_lock);  // caller locks.
++
++    double start = os::elapsedTime();
+     // First, mark for unload all ClassLoaderData referencing a dead class loader.
+     unloading_occurred = ClassLoaderDataGraph::do_unloading();
++    log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=CLDG Do Unloading duration=%.3fms",
++                           (os::elapsedTime() - start) * 1000.0);
++
+     if (unloading_occurred) {
+       ConditionalMutexLocker ml2(Module_lock, is_concurrent);
+       JFR_ONLY(Jfr::on_unloading_classes();)
+       MANAGEMENT_ONLY(FinalizerService::purge_unloaded();)
+       ConditionalMutexLocker ml1(SystemDictionary_lock, is_concurrent);
++
++      start = os::elapsedTime();
+       ClassLoaderDataGraph::clean_module_and_package_info();
++      log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Module Package Cleanup duration=%.3fms",
++                             (os::elapsedTime() - start) * 1000.0);
++
++      start = os::elapsedTime();
+       LoaderConstraintTable::purge_loader_constraints();
++      log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Loader Constraints duration=%.3fms",
++                             (os::elapsedTime() - start) * 1000.0);
++
++      start = os::elapsedTime();
+       ResolutionErrorTable::purge_resolution_errors();
++      log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Resolution Errors duration=%.3fms",
++                             (os::elapsedTime() - start) * 1000.0);
+     }
+   }
+ 
+   GCTraceTime(Debug, gc, phases) t("Trigger cleanups", gc_timer);
+ 
+   if (unloading_occurred) {
++    double start = os::elapsedTime();
+     SymbolTable::trigger_cleanup();
++    log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Symbol Cleanup Trigger duration=%.3fms",
++                           (os::elapsedTime() - start) * 1000.0);
+ 
+     ConditionalMutexLocker ml(ClassInitError_lock, is_concurrent);
++    start = os::elapsedTime();
+     InstanceKlass::clean_initialization_error_table();
++    log_debug(gc, preempt)("Old Class Unlink SystemDictionary subphase=Class Init Errors duration=%.3fms",
++                           (os::elapsedTime() - start) * 1000.0);
+   }
+ 
+   return unloading_occurred;
+diff --git a/src/hotspot/share/gc/z/zArguments.cpp b/src/hotspot/share/gc/z/zArguments.cpp
+index 03aa8e5..3f32e18 100644
+--- a/src/hotspot/share/gc/z/zArguments.cpp
++++ b/src/hotspot/share/gc/z/zArguments.cpp
+@@ -151,7 +151,9 @@ void ZArguments::initialize() {
+   // Set medium page size here because MaxTenuringThreshold may use it.
+   ZHeuristics::set_medium_page_size();
+ 
+-  if (!FLAG_IS_DEFAULT(ZTenuringThreshold) && ZTenuringThreshold != -1) {
++  if (!FLAG_IS_DEFAULT(ZTenuringThreshold) &&
++      ZTenuringThreshold != -1 &&
++      ZTenuringThreshold <= static_cast<int>(markWord::max_age + 1)) {
+     FLAG_SET_ERGO_IF_DEFAULT(MaxTenuringThreshold, (uint)ZTenuringThreshold);
+     if (MaxTenuringThreshold == 0) {
+       FLAG_SET_ERGO_IF_DEFAULT(AlwaysTenure, true);
+@@ -185,11 +187,6 @@ void ZArguments::initialize() {
+                                           ZGranuleSize / M));
+   }
+ 
+-  if (!FLAG_IS_DEFAULT(ZTenuringThreshold) && ZTenuringThreshold > static_cast<int>(MaxTenuringThreshold)) {
+-    vm_exit_during_initialization(err_msg("ZTenuringThreshold must be be within bounds of "
+-                                          "MaxTenuringThreshold"));
+-  }
+-
+ #ifdef COMPILER2
+   // Enable loop strip mining by default
+   if (FLAG_IS_DEFAULT(UseCountedLoopSafepoints)) {
+diff --git a/src/hotspot/share/gc/z/zBarrierSet.cpp b/src/hotspot/share/gc/z/zBarrierSet.cpp
+index 43ea791..98abb7d 100644
+--- a/src/hotspot/share/gc/z/zBarrierSet.cpp
++++ b/src/hotspot/share/gc/z/zBarrierSet.cpp
+@@ -141,7 +141,7 @@ void ZBarrierSet::on_slowpath_allocation_exit(JavaThread* thread, oop new_obj) {
+     return;
+   }
+ 
+-  if (ZRelocate::compute_to_age(age) != ZPageAge::old) {
++  if (ZRelocate::compute_to_age(page) != ZPageAge::old) {
+     return;
+   }
+ 
+diff --git a/src/hotspot/share/gc/z/zBreakpoint.cpp b/src/hotspot/share/gc/z/zBreakpoint.cpp
+index 00e91c2..623b5f9 100644
+--- a/src/hotspot/share/gc/z/zBreakpoint.cpp
++++ b/src/hotspot/share/gc/z/zBreakpoint.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include "gc/shared/concurrentGCBreakpoints.hpp"
+ #include "gc/z/zBreakpoint.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "runtime/mutexLocker.hpp"
+ #include "utilities/debug.hpp"
+ 
+@@ -50,13 +51,16 @@ void ZBreakpoint::at_after_gc() {
+ }
+ 
+ void ZBreakpoint::at_after_marking_started() {
++  ZOldPreemptionLeaver preemption_leaver;
+   ConcurrentGCBreakpoints::at("AFTER MARKING STARTED");
+ }
+ 
+ void ZBreakpoint::at_before_marking_completed() {
++  ZOldPreemptionLeaver preemption_leaver;
+   ConcurrentGCBreakpoints::at("BEFORE MARKING COMPLETED");
+ }
+ 
+ void ZBreakpoint::at_after_reference_processing_started() {
++  ZOldPreemptionLeaver preemption_leaver;
+   ConcurrentGCBreakpoints::at("AFTER CONCURRENT REFERENCE PROCESSING STARTED");
+ }
+diff --git a/src/hotspot/share/gc/z/zDirector.cpp b/src/hotspot/share/gc/z/zDirector.cpp
+index f1256ee..6f7cfa2 100644
+--- a/src/hotspot/share/gc/z/zDirector.cpp
++++ b/src/hotspot/share/gc/z/zDirector.cpp
+@@ -73,7 +73,8 @@ struct ZDirectorStats {
+ 
+ ZDirector::ZDirector()
+   : _monitor(),
+-    _stopped(false) {
++    _stopped(false),
++    _post_minor_major_triggered(false) {
+   _director = this;
+   set_name("ZDirector");
+   create_and_start();
+@@ -640,11 +641,19 @@ static GCCause::Cause make_minor_gc_decision(const ZDirectorStats& stats) {
+   return GCCause::_no_gc;
+ }
+ 
+-static GCCause::Cause make_major_gc_decision(const ZDirectorStats& stats) {
++static bool rule_major_post_minor_threshold(bool post_minor_major_triggered) {
++  return post_minor_major_triggered;
++}
++
++static GCCause::Cause make_major_gc_decision(const ZDirectorStats& stats, bool post_minor_major_triggered) {
+   if (ZDriver::major()->is_busy()) {
+     return GCCause::_no_gc;
+   }
+ 
++  if (rule_major_post_minor_threshold(post_minor_major_triggered)) {
++    return GCCause::_z_high_usage;
++  }
++
+   if (rule_major_timer(stats)) {
+     return GCCause::_z_timer;
+   }
+@@ -829,9 +838,9 @@ static void start_minor_gc(const ZDirectorStats& stats, GCCause::Cause cause) {
+   ZDriver::minor()->collect(request);
+ }
+ 
+-static bool start_gc(const ZDirectorStats& stats) {
++static bool start_gc(const ZDirectorStats& stats, bool post_minor_major_triggered) {
+   // Try start major collections first as they include a minor collection
+-  const GCCause::Cause major_cause = make_major_gc_decision(stats);
++  const GCCause::Cause major_cause = make_major_gc_decision(stats, post_minor_major_triggered);
+   if (major_cause != GCCause::_no_gc) {
+     start_major_gc(stats, major_cause);
+     return true;
+@@ -857,6 +866,19 @@ void ZDirector::evaluate_rules() {
+   _director->_monitor.notify();
+ }
+ 
++void ZDirector::minor_completed(bool major_triggered) {
++  ZLocker<ZConditionLock> locker(&_director->_monitor);
++  _director->_post_minor_major_triggered |= major_triggered;
++  _director->_monitor.notify();
++}
++
++bool ZDirector::consume_post_minor_major_triggered() {
++  ZLocker<ZConditionLock> locker(&_monitor);
++  const bool triggered = _post_minor_major_triggered;
++  _post_minor_major_triggered = false;
++  return triggered;
++}
++
+ bool ZDirector::wait_for_tick() {
+   const uint64_t interval_ms = MILLIUNITS / DecisionHz;
+ 
+@@ -928,8 +950,9 @@ static ZDirectorStats sample_stats() {
+ void ZDirector::run_thread() {
+   // Main loop
+   while (wait_for_tick()) {
++    const bool post_minor_major_triggered = consume_post_minor_major_triggered();
+     ZDirectorStats stats = sample_stats();
+-    if (!start_gc(stats)) {
++    if (!start_gc(stats, post_minor_major_triggered)) {
+       adjust_gc(stats);
+     }
+   }
+diff --git a/src/hotspot/share/gc/z/zDirector.hpp b/src/hotspot/share/gc/z/zDirector.hpp
+index 624d356..830be5a 100644
+--- a/src/hotspot/share/gc/z/zDirector.hpp
++++ b/src/hotspot/share/gc/z/zDirector.hpp
+@@ -34,8 +34,10 @@ private:
+ 
+   ZConditionLock _monitor;
+   bool           _stopped;
++  bool           _post_minor_major_triggered;
+ 
+   bool wait_for_tick();
++  bool consume_post_minor_major_triggered();
+ 
+ protected:
+   virtual void run_thread();
+@@ -45,6 +47,7 @@ public:
+   ZDirector();
+ 
+   static void evaluate_rules();
++  static void minor_completed(bool major_triggered);
+ };
+ 
+ #endif // SHARE_GC_Z_ZDIRECTOR_HPP
+diff --git a/src/hotspot/share/gc/z/zDriver.cpp b/src/hotspot/share/gc/z/zDriver.cpp
+index e8f7af1..64fcac0 100644
+--- a/src/hotspot/share/gc/z/zDriver.cpp
++++ b/src/hotspot/share/gc/z/zDriver.cpp
+@@ -29,12 +29,14 @@
+ #include "gc/z/zCollectedHeap.hpp"
+ #include "gc/z/zDirector.hpp"
+ #include "gc/z/zDriver.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zGCIdPrinter.hpp"
+ #include "gc/z/zGeneration.inline.hpp"
+ #include "gc/z/zHeap.inline.hpp"
+ #include "gc/z/zLock.inline.hpp"
+ #include "gc/z/zServiceability.hpp"
+ #include "gc/z/zStat.hpp"
++#include "gc/z/z_globals.hpp"
+ 
+ static const ZStatPhaseCollection ZPhaseCollectionMinor("Minor Collection", true /* minor */);
+ static const ZStatPhaseCollection ZPhaseCollectionMajor("Major Collection", false /* minor */);
+@@ -62,6 +64,7 @@ ZDriverMajor* ZDriver::_major;
+ 
+ void ZDriver::initialize() {
+   _lock = new ZLock();
++  ZOldPreemption::initialize();
+ }
+ 
+ void ZDriver::lock() {
+@@ -187,7 +190,9 @@ public:
+ void ZDriverMinor::gc(const ZDriverRequest& request) {
+   ZDriverScopeMinor scope(request, &_gc_timer);
+   ZGCIdMinor minor_id(gc_id());
++  ZOldPreemption::minor_start();
+   ZGeneration::young()->collect(ZYoungType::minor, &_gc_timer);
++  ZOldPreemption::minor_end();
+ }
+ 
+ static void handle_alloc_stalling_for_young() {
+@@ -204,6 +209,7 @@ void ZDriverMinor::run_thread() {
+     // Wait for GC request
+     const ZDriverRequest request = _port.receive();
+ 
++    ZOldPreemptionRequest preemption;
+     ZDriverLocker locker;
+ 
+     abortpoint();
+@@ -213,6 +219,19 @@ void ZDriverMinor::run_thread() {
+ 
+     abortpoint();
+ 
++    const ZHeap* const heap = ZHeap::heap();
++    const size_t used_after_minor = heap->used();
++    const size_t soft_max_capacity = heap->soft_max_capacity();
++    const uintx trigger_percent = ZOldGCPostMinorSoftMaxPercent;
++    const double trigger_capacity = (double)soft_max_capacity * ((double)trigger_percent / 100.0);
++    const bool post_minor_major_triggered = ZOldGCPostMinorSoftMaxMajor &&
++                                            (double)used_after_minor >= trigger_capacity;
++    if (post_minor_major_triggered) {
++      log_debug(gc, director)("Rule Major: Post-Minor SoftMax Threshold, UsedAfterMinor: %zuMB, SoftMax: %zuMB, Trigger: %zu%% (%.1fMB)",
++                              used_after_minor / M, soft_max_capacity / M, (size_t)trigger_percent,
++                              trigger_capacity / M);
++    }
++
+     // Notify GC completed
+     _port.ack();
+ 
+@@ -220,7 +239,7 @@ void ZDriverMinor::run_thread() {
+     handle_alloc_stalls();
+ 
+     // Good point to consider back-to-back GC
+-    ZDirector::evaluate_rules();
++    ZDirector::minor_completed(post_minor_major_triggered);
+   }
+ }
+ 
+@@ -247,6 +266,7 @@ static bool should_clear_all_soft_references(GCCause::Cause cause) {
+   case GCCause::_z_timer:
+   case GCCause::_z_warmup:
+   case GCCause::_z_allocation_rate:
++  case GCCause::_z_high_usage:
+   case GCCause::_z_proactive:
+   case GCCause::_metadata_GC_threshold:
+   case GCCause::_codecache_GC_threshold:
+@@ -285,6 +305,7 @@ static bool should_preclean_young(GCCause::Cause cause) {
+   case GCCause::_z_timer:
+   case GCCause::_z_warmup:
+   case GCCause::_z_allocation_rate:
++  case GCCause::_z_high_usage:
+   case GCCause::_z_proactive:
+   case GCCause::_metadata_GC_threshold:
+   case GCCause::_codecache_GC_threshold:
+@@ -349,6 +370,7 @@ void ZDriverMajor::collect(const ZDriverRequest& request) {
+   case GCCause::_z_timer:
+   case GCCause::_z_warmup:
+   case GCCause::_z_allocation_rate:
++  case GCCause::_z_high_usage:
+   case GCCause::_z_allocation_stall:
+   case GCCause::_z_proactive:
+   case GCCause::_codecache_GC_threshold:
+diff --git a/src/hotspot/share/gc/z/zForwarding.hpp b/src/hotspot/share/gc/z/zForwarding.hpp
+index c58c479..a4992d0 100644
+--- a/src/hotspot/share/gc/z/zForwarding.hpp
++++ b/src/hotspot/share/gc/z/zForwarding.hpp
+@@ -61,6 +61,8 @@ private:
+   ZPage* const           _page;
+   const ZPageAge         _from_age;
+   const ZPageAge         _to_age;
++  const uint32_t         _from_young_age;
++  const uint32_t         _to_young_age;
+   volatile bool          _claimed;
+   mutable ZConditionLock _ref_lock;
+   volatile int32_t       _ref_count;
+@@ -94,15 +96,17 @@ private:
+   template <typename Function>
+   void object_iterate_forwarded_via_livemap(Function function);
+ 
+-  ZForwarding(ZPage* page, ZPageAge to_age, size_t nentries);
++  ZForwarding(ZPage* page, ZPageAge to_age, uint32_t to_young_age, size_t nentries);
+ 
+ public:
+   static uint32_t nentries(const ZPage* page);
+-  static ZForwarding* alloc(ZForwardingAllocator* allocator, ZPage* page, ZPageAge to_age);
++  static ZForwarding* alloc(ZForwardingAllocator* allocator, ZPage* page, ZPageAge to_age, uint32_t to_young_age);
+ 
+   ZPageType type() const;
+   ZPageAge from_age() const;
+   ZPageAge to_age() const;
++  uint32_t from_young_age() const;
++  uint32_t to_young_age() const;
+   zoffset start() const;
+   zoffset_end end() const;
+   size_t size() const;
+diff --git a/src/hotspot/share/gc/z/zForwarding.inline.hpp b/src/hotspot/share/gc/z/zForwarding.inline.hpp
+index eb5f4a3..fb9392a 100644
+--- a/src/hotspot/share/gc/z/zForwarding.inline.hpp
++++ b/src/hotspot/share/gc/z/zForwarding.inline.hpp
+@@ -50,19 +50,21 @@ inline uint32_t ZForwarding::nentries(const ZPage* page) {
+   return round_up_power_of_2(page->live_objects() * 2);
+ }
+ 
+-inline ZForwarding* ZForwarding::alloc(ZForwardingAllocator* allocator, ZPage* page, ZPageAge to_age) {
++inline ZForwarding* ZForwarding::alloc(ZForwardingAllocator* allocator, ZPage* page, ZPageAge to_age, uint32_t to_young_age) {
+   const size_t nentries = ZForwarding::nentries(page);
+   void* const addr = AttachedArray::alloc(allocator, nentries);
+-  return ::new (addr) ZForwarding(page, to_age, nentries);
++  return ::new (addr) ZForwarding(page, to_age, to_young_age, nentries);
+ }
+ 
+-inline ZForwarding::ZForwarding(ZPage* page, ZPageAge to_age, size_t nentries)
++inline ZForwarding::ZForwarding(ZPage* page, ZPageAge to_age, uint32_t to_young_age, size_t nentries)
+   : _virtual(page->virtual_memory()),
+     _object_alignment_shift(page->object_alignment_shift()),
+     _entries(nentries),
+     _page(page),
+     _from_age(page->age()),
+     _to_age(to_age),
++    _from_young_age(page->young_age()),
++    _to_young_age(to_young_age),
+     _claimed(false),
+     _ref_lock(),
+     _ref_count(1),
+@@ -86,6 +88,14 @@ inline ZPageAge ZForwarding::to_age() const {
+   return _to_age;
+ }
+ 
++inline uint32_t ZForwarding::from_young_age() const {
++  return _from_young_age;
++}
++
++inline uint32_t ZForwarding::to_young_age() const {
++  return _to_young_age;
++}
++
+ inline zoffset ZForwarding::start() const {
+   return _virtual.start();
+ }
+diff --git a/src/hotspot/share/gc/z/zGeneration.cpp b/src/hotspot/share/gc/z/zGeneration.cpp
+index 772c5a0..1e23742 100644
+--- a/src/hotspot/share/gc/z/zGeneration.cpp
++++ b/src/hotspot/share/gc/z/zGeneration.cpp
+@@ -35,6 +35,7 @@
+ #include "gc/z/zBreakpoint.hpp"
+ #include "gc/z/zCollectedHeap.hpp"
+ #include "gc/z/zDriver.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zForwarding.hpp"
+ #include "gc/z/zForwardingTable.inline.hpp"
+ #include "gc/z/zGeneration.inline.hpp"
+@@ -188,6 +189,9 @@ void ZGeneration::select_relocation_set(bool promote_all) {
+   {
+     ZGenerationPagesIterator pt_iter(_page_table, _id, _page_allocator);
+     for (ZPage* page; pt_iter.next(&page);) {
++      if (is_old() && ZOldPreemption::requested()) {
++        pt_iter.yield([]() { ZOldPreemption::poll(false); });
++      }
+       if (!page->is_relocatable()) {
+         // Not relocatable, don't register
+         continue;
+@@ -240,6 +244,7 @@ void ZGeneration::select_relocation_set(bool promote_all) {
+   ZRelocationSetIterator rs_iter(&_relocation_set);
+   for (ZForwarding* forwarding; rs_iter.next(&forwarding);) {
+     _forwarding_table.insert(forwarding);
++    if (is_old()) ZOldPreemption::poll(false);
+   }
+ 
+   // Update statistics
+@@ -256,6 +261,7 @@ void ZGeneration::reset_relocation_set() {
+   ZRelocationSetIterator iter(&_relocation_set);
+   for (ZForwarding* forwarding; iter.next(&forwarding);) {
+     _forwarding_table.remove(forwarding);
++    if (is_old()) ZOldPreemption::poll(false);
+   }
+ 
+   // Reset relocation set
+@@ -688,7 +694,7 @@ void ZGenerationYoung::select_tenuring_threshold(ZRelocationSetSelectorStats sta
+     _tenuring_threshold = compute_tenuring_threshold(stats);
+     reason = "Computed";
+   }
+-  log_info(gc, reloc)("Using tenuring threshold: %d (%s)", _tenuring_threshold, reason);
++  log_info(gc, reloc)("Using tenuring threshold: %u (%s)", _tenuring_threshold, reason);
+ }
+ 
+ uint ZGenerationYoung::compute_tenuring_threshold(ZRelocationSetSelectorStats stats) {
+@@ -996,6 +1002,7 @@ bool ZGenerationOld::should_record_stats() {
+ 
+ void ZGenerationOld::collect(ConcurrentGCTimer* timer) {
+   ZGenerationCollectionScopeOld scope(timer);
++  ZOldPreemptionCycle preemption;
+ 
+   // Phase 1: Concurrent Mark
+   concurrent_mark();
+@@ -1033,6 +1040,7 @@ void ZGenerationOld::collect(ConcurrentGCTimer* timer) {
+ 
+   abortpoint();
+ 
++  ZOldPreemption::phase("Remap + Relocate Start");
+   {
+     ZDriverLocker locker;
+ 
+@@ -1069,6 +1077,7 @@ void ZGenerationOld::concurrent_mark() {
+   ZStatTimerOld timer(ZPhaseConcurrentMarkOld);
+   ZBreakpoint::at_after_marking_started();
+   mark_roots();
++  ZOldPreemption::phase("Mark");
+   mark_follow();
+   ZBreakpoint::at_before_marking_completed();
+ }
+@@ -1091,26 +1100,31 @@ public:
+ };
+ 
+ bool ZGenerationOld::pause_mark_end() {
++  ZOldPreemption::phase("Mark End");
+   return VM_ZMarkEndOld().pause();
+ }
+ 
+ void ZGenerationOld::concurrent_mark_continue() {
++  ZOldPreemption::phase("Mark Continue");
+   ZStatTimerOld timer(ZPhaseConcurrentMarkContinueOld);
+   mark_follow();
+ }
+ 
+ void ZGenerationOld::concurrent_mark_free() {
++  ZOldPreemption::phase("Mark Free");
+   ZStatTimerOld timer(ZPhaseConcurrentMarkFreeOld);
+   mark_free();
+ }
+ 
+ void ZGenerationOld::concurrent_process_non_strong_references() {
++  ZOldPreemption::phase("Process Non-Strong");
+   ZStatTimerOld timer(ZPhaseConcurrentProcessNonStrongOld);
+   ZBreakpoint::at_after_reference_processing_started();
+   process_non_strong_references();
+ }
+ 
+ void ZGenerationOld::concurrent_reset_relocation_set() {
++  ZOldPreemption::phase("Reset Relocation Set");
+   ZStatTimerOld timer(ZPhaseConcurrentResetRelocationSetOld);
+   reset_relocation_set();
+ }
+@@ -1135,6 +1149,7 @@ public:
+ };
+ 
+ void ZGenerationOld::pause_verify() {
++  ZOldPreemption::phase("Verify");
+   // Note that we block out concurrent young collections when performing the
+   // verification. The verification checks that store good oops in the
+   // old generation have a corresponding remembered set entry, or is in
+@@ -1150,6 +1165,7 @@ void ZGenerationOld::pause_verify() {
+ }
+ 
+ void ZGenerationOld::concurrent_select_relocation_set() {
++  ZOldPreemption::phase("Select Relocation Set");
+   ZStatTimerOld timer(ZPhaseConcurrentSelectRelocationSetOld);
+   select_relocation_set(false /* promote_all */);
+ }
+@@ -1182,6 +1198,8 @@ void ZGenerationOld::pause_relocate_start() {
+ }
+ 
+ void ZGenerationOld::concurrent_relocate() {
++  // The queue already reserves workers: launch them before driver parking.
++  ZOldPreemption::phase("Relocate Setup", false);
+   ZStatTimerOld timer(ZPhaseConcurrentRelocatedOld);
+   relocate();
+ }
+@@ -1321,6 +1339,7 @@ void ZGenerationOld::process_non_strong_references() {
+   _reference_processor.process_references();
+ 
+   // Process weak roots
++  ZOldPreemption::phase("Weak Roots");
+   _weak_roots_processor.process_weak_roots();
+ 
+   ClassUnloadingContext ctx(_workers.active_workers(),
+@@ -1328,6 +1347,7 @@ void ZGenerationOld::process_non_strong_references() {
+                             true /* lock_nmethod_free_separately */);
+ 
+   // Unlink stale metadata and nmethods
++  ZOldPreemption::phase("Class Unlink");
+   _unload.unlink();
+ 
+   // Perform a handshake. This is needed 1) to make sure that stale
+@@ -1338,18 +1358,22 @@ void ZGenerationOld::process_non_strong_references() {
+   // this point the mutator could see the unblocked state and pass
+   // this invalid oop through the normal barrier path, which would
+   // incorrectly try to mark the oop.
++  ZOldPreemption::phase("Handshake");
+   ZRendezvousHandshakeClosure cl;
+   Handshake::execute(&cl);
+ 
+   // GC threads are not part of the handshake above.
+   // Explicitly "handshake" them.
++  ZOldPreemption::phase("GC Rendezvous");
+   ZRendezvousGCThreads op;
+   VMThread::execute(&op);
+ 
+   // Unblock resurrection of weak/phantom references
++  ZOldPreemption::phase("Unblock Resurrection");
+   ZResurrection::unblock();
+ 
+   // Purge stale metadata and nmethods that were unlinked
++  ZOldPreemption::phase("Class Purge");
+   _unload.purge();
+ 
+   // Enqueue Soft/Weak/Final/PhantomReferences. Note that this
+@@ -1358,6 +1382,7 @@ void ZGenerationOld::process_non_strong_references() {
+   // that were just enqueued, which would incorrectly return null
+   // during the resurrection block window, since such referents
+   // are only Finalizable marked.
++  ZOldPreemption::phase("Enqueue References");
+   _reference_processor.enqueue_references();
+ 
+   // Clear old markings claim bits.
+diff --git a/src/hotspot/share/gc/z/zMark.cpp b/src/hotspot/share/gc/z/zMark.cpp
+index 9846f12..7d872ad 100644
+--- a/src/hotspot/share/gc/z/zMark.cpp
++++ b/src/hotspot/share/gc/z/zMark.cpp
+@@ -38,6 +38,7 @@
+ #include "gc/z/zHeap.inline.hpp"
+ #include "gc/z/zLock.inline.hpp"
+ #include "gc/z/zMark.inline.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zMarkCache.inline.hpp"
+ #include "gc/z/zMarkContext.inline.hpp"
+ #include "gc/z/zMarkStack.inline.hpp"
+@@ -463,6 +464,7 @@ bool ZMark::rebalance_work(ZMarkContext* context) {
+     flush(Thread::current());
+   }
+ 
++  ZOldPreemption::poll(true);
+   SuspendibleThreadSet::yield();
+ 
+   return ZAbort::should_abort() || _generation->should_worker_resize();
+@@ -480,11 +482,14 @@ bool ZMark::drain(ZMarkContext* context) {
+   while (stacks->pop(&_marking_smr, &_stripes, context->stripe(), &entry)) {
+     mark_and_follow(context, entry);
+ 
+-    if ((processed++ & 31) == 0 && rebalance_work(context)) {
+-      return false;
++    if (++processed == 32) {
++      ZOldPreemption::mark_progress(processed);
++      processed = 0;
++      if (rebalance_work(context)) return false;
+     }
+   }
+ 
++  ZOldPreemption::mark_progress(processed);
+   return true;
+ }
+ 
+@@ -634,6 +639,7 @@ bool ZMark::follow_work(bool partial) {
+   ZMarkContext context(ZMarkStripesMax, stripe, stacks);
+ 
+   for (;;) {
++    ZOldPreemption::poll(true);
+     if (!drain(&context)) {
+       leave();
+       return false;
+@@ -653,6 +659,7 @@ bool ZMark::follow_work(bool partial) {
+       continue;
+     }
+ 
++    if (ZOldPreemption::joined()) ZHeap::heap()->mark_flush(Thread::current());
+     if (try_terminate(&context)) {
+       // Terminate
+       return true;
+@@ -798,7 +805,7 @@ private:
+ 
+ public:
+   ZMarkOldRootsTask(ZMark* mark)
+-    : ZTask("ZMarkOldRootsTask"),
++    : ZTask("ZMarkOldRootsTask", ZOldTaskMode::cooperative),
+       _mark(mark),
+       _roots_colored(ZGenerationIdOptional::old),
+       _roots_uncolored(ZGenerationIdOptional::old),
+@@ -808,17 +815,21 @@ public:
+       _nm_cl() {}
+ 
+   virtual void work() {
++    SuspendibleThreadSetJoiner sts_joiner(ZOldPreemption::joined());
++
+     {
+       ZStatTimerWorker timer(ZSubPhaseConcurrentMarkRootColoredOld);
+       _roots_colored.apply(&_cl_colored,
+                            &_cld_cl);
+     }
++    ZOldPreemption::poll(true);
+ 
+     {
+       ZStatTimerWorker timer(ZSubPhaseConcurrentMarkRootUncoloredOld);
+       _roots_uncolored.apply(&_thread_cl,
+                              &_nm_cl);
+     }
++    ZOldPreemption::poll(true);
+ 
+     // Flush and free worker stacks. Needed here since
+     // the set of workers executing during root scanning
+@@ -892,7 +903,7 @@ private:
+ 
+ public:
+   ZMarkTask(ZMark* mark)
+-    : ZRestartableTask("ZMarkTask"),
++    : ZRestartableTask("ZMarkTask", ZOldTaskMode::cooperative),
+       _mark(mark) {
+     _mark->prepare_work();
+   }
+@@ -932,6 +943,10 @@ void ZMark::mark_young_roots() {
+ void ZMark::mark_old_roots() {
+   SuspendibleThreadSetJoiner sts_joiner;
+   ZMarkOldRootsTask task(this);
++  // Cooperative workers own STS membership while scanning. Do not leave the
++  // Old driver joined in STS while it waits for workers that may park for a
++  // Young collection.
++  SuspendibleThreadSetLeaver sts_leaver(ZOldPreemption::joined());
+   workers()->run(&task);
+ }
+ 
+diff --git a/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp b/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
+index cdd9e7d..a42cc99 100644
+--- a/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
++++ b/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
+@@ -23,6 +23,7 @@
+ 
+ #ifndef SHARE_GC_Z_ZMARKTERMINATE_INLINE_HPP
+ #define SHARE_GC_Z_ZMARKTERMINATE_INLINE_HPP
++#include "gc/z/zOldPreemption.hpp"
+ 
+ #include "gc/z/zMarkTerminate.hpp"
+ 
+@@ -67,6 +68,7 @@ inline void ZMarkTerminate::maybe_reduce_stripes(ZMarkStripeSet* stripes, size_t
+ 
+ inline bool ZMarkTerminate::try_terminate(ZMarkStripeSet* stripes, size_t used_nstripes) {
+   SuspendibleThreadSetLeaver sts_leaver;
++  ZOldPreemptionLeaver old_leaver;
+   ZLocker<ZConditionLock> locker(&_lock);
+ 
+   Atomic::store(&_nworking, _nworking - 1);
+diff --git a/src/hotspot/share/gc/z/zNMethod.cpp b/src/hotspot/share/gc/z/zNMethod.cpp
+index bf592c2..90f80d0 100644
+--- a/src/hotspot/share/gc/z/zNMethod.cpp
++++ b/src/hotspot/share/gc/z/zNMethod.cpp
+@@ -38,6 +38,7 @@
+ #include "gc/z/zNMethod.hpp"
+ #include "gc/z/zNMethodData.hpp"
+ #include "gc/z/zNMethodTable.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zTask.hpp"
+ #include "gc/z/zUncoloredRoot.inline.hpp"
+ #include "gc/z/zWorkers.hpp"
+@@ -341,6 +342,13 @@ oop ZNMethod::oop_load(const nmethod* const_nm, int index, bool keep_alive) {
+   return to_oop(safe(obj));
+ }
+ 
++class ZNMethodUnlinkPreemptionPoll : public StackObj {
++public:
++  ~ZNMethodUnlinkPreemptionPoll() {
++    ZOldPreemption::poll(true);
++  }
++};
++
+ class ZNMethodUnlinkClosure : public NMethodClosure {
+ private:
+   bool _unloading_occurred;
+@@ -350,6 +358,10 @@ public:
+     : _unloading_occurred(unloading_occurred) {}
+ 
+   virtual void do_nmethod(nmethod* nm) {
++    // Construct before any per-nmethod locks. The guard runs after those
++    // locks have been released, so a Minor never parks this worker while
++    // holding an nmethod or compiled-IC lock.
++    ZNMethodUnlinkPreemptionPoll preemption_poll;
+     if (nm->is_unloading()) {
+       // Unlink from the ZNMethodTable
+       ZNMethod::unregister_nmethod(nm);
+@@ -398,7 +410,7 @@ private:
+ 
+ public:
+   ZNMethodUnlinkTask(bool unloading_occurred)
+-    : ZTask("ZNMethodUnlinkTask"),
++    : ZTask("ZNMethodUnlinkTask", ZOldTaskMode::cooperative),
+       _cl(unloading_occurred) {
+     ZNMethodTable::nmethods_do_begin(false /* secondary */);
+   }
+@@ -408,12 +420,21 @@ public:
+   }
+ 
+   virtual void work() {
++    // The Old driver temporarily leaves STS while waiting for this task.
++    // Each unlink worker therefore owns its STS membership directly and can
++    // leave it together with Old-preemption participation at a safe poll.
++    SuspendibleThreadSetJoiner sts_joiner(ZOldPreemption::joined());
+     ZNMethodTable::nmethods_do(false /* secondary */, &_cl);
+   }
+ };
+ 
+ void ZNMethod::unlink(ZWorkers* workers, bool unloading_occurred) {
+   ZNMethodUnlinkTask task(unloading_occurred);
++  // Keep begin/end under the caller's existing STS membership, but do not
++  // leave that driver STS member blocked waiting for cooperative workers.
++  // Otherwise a Young safepoint could wait for the driver while the workers
++  // are parked waiting for that same Young collection to finish.
++  SuspendibleThreadSetLeaver sts_leaver(ZOldPreemption::joined());
+   workers->run(&task);
+ }
+ 
+diff --git a/src/hotspot/share/gc/z/zOldPreemption.cpp b/src/hotspot/share/gc/z/zOldPreemption.cpp
+new file mode 100644
+index 0000000..3787090
+--- /dev/null
++++ b/src/hotspot/share/gc/z/zOldPreemption.cpp
+@@ -0,0 +1,225 @@
++/*
++ * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++#include "gc/shared/gcId.hpp"
++#include "gc/shared/suspendibleThreadSet.hpp"
++#include "gc/z/zAbort.inline.hpp"
++#include "gc/z/zGeneration.inline.hpp"
++#include "gc/z/zHeap.inline.hpp"
++#include "gc/z/zLock.inline.hpp"
++#include "gc/z/zOldPreemption.hpp"
++#include "gc/z/z_globals.hpp"
++#include "logging/log.hpp"
++#include "runtime/atomic.hpp"
++#include "runtime/os.hpp"
++#include "runtime/thread.inline.hpp"
++
++ZConditionLock* ZOldPreemption::_lock = nullptr;
++volatile bool ZOldPreemption::_requested = false;
++THREAD_LOCAL bool ZOldPreemption::_joined = false;
++uint ZOldPreemption::_running = 0;
++bool ZOldPreemption::_active = false;
++uint ZOldPreemption::_cycle = 0;
++uint64_t ZOldPreemption::_request = 0;
++uint64_t ZOldPreemption::_pauses = 0;
++volatile uint64_t ZOldPreemption::_mark_entries = 0;
++volatile uint64_t ZOldPreemption::_relocated_pages = 0;
++const char* ZOldPreemption::_phase = "Idle";
++double ZOldPreemption::_requested_at = 0;
++double ZOldPreemption::_parked_at = 0;
++double ZOldPreemption::_paused_seconds = 0;
++volatile bool ZOldPreemption::_run_window_pending = false;
++double ZOldPreemption::_preemption_allowed_at = 0;
++void ZOldPreemption::initialize() { _lock = new ZConditionLock(); }
++bool ZOldPreemption::joined() { return _joined; }
++bool ZOldPreemption::requested() { return Atomic::load(&_requested); }
++void ZOldPreemption::start_run_window_locked(const char* source) {
++  if (!_active || !Atomic::load(&_run_window_pending)) return;
++
++  const double now = os::elapsedTime();
++  Atomic::store(&_run_window_pending, false);
++  _preemption_allowed_at = now + (double)ZOldPreemptionMinRunMillis / 1000.0;
++  log_debug(gc, preempt)("Old cycle=%u phase=%s run-window started source=%s at=%.6f min=%zums eligible=%.6f",
++                         _cycle, _phase, source, now, (size_t)ZOldPreemptionMinRunMillis,
++                         _preemption_allowed_at);
++  _lock->notify_all();
++}
++void ZOldPreemption::join() {
++  if (!ZOldGCPreemption) return;
++  assert(!_joined, "Nested Old participation");
++  ZLocker<ZConditionLock> locker(_lock);
++  while (_requested) _lock->wait();
++  const bool first_running = _running == 0;
++  _running++;
++  _joined = true;
++  if (first_running) start_run_window_locked("join");
++}
++void ZOldPreemption::leave() {
++  if (!ZOldGCPreemption) return;
++  ZLocker<ZConditionLock> locker(_lock);
++  assert(_joined && _running > 0, "Missing Old participation");
++  _joined = false;
++  _running--;
++  if (_running == 0) _lock->notify_all();
++}
++void ZOldPreemption::start() {
++  join();
++  if (!ZOldGCPreemption) return;
++  ZLocker<ZConditionLock> locker(_lock);
++  _cycle = GCId::current();
++  _active = true;
++  _pauses = 0;
++  _paused_seconds = 0;
++  Atomic::store(&_run_window_pending, false);
++  _preemption_allowed_at = os::elapsedTime() + (double)ZOldPreemptionMinRunMillis / 1000.0;
++  Atomic::store(&_mark_entries, uint64_t(0));
++  Atomic::store(&_relocated_pages, uint64_t(0));
++  _phase = "Mark Roots";
++  log_debug(gc, preempt)("Old cycle=%u started epoch=%u min-run=%zums eligible=%.6f",
++                         _cycle, ZGeneration::old()->seqnum(), (size_t)ZOldPreemptionMinRunMillis,
++                         _preemption_allowed_at);
++}
++void ZOldPreemption::end() {
++  if (!ZOldGCPreemption) return;
++  poll(false);
++  {
++    ZLocker<ZConditionLock> locker(_lock);
++    log_debug(gc, preempt)("Old cycle=%u %s pauses=" UINT64_FORMAT " paused=%.3fms mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
++                          _cycle, ZAbort::should_abort() ? "shutdown-aborted" : "completed", _pauses,
++                          _paused_seconds * 1000, Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
++    _active = false;
++    _phase = "Idle";
++    Atomic::store(&_run_window_pending, false);
++    _preemption_allowed_at = 0;
++    _lock->notify_all();
++  }
++  leave();
++}
++void ZOldPreemption::phase(const char* name, bool poll_before) {
++  if (!ZOldGCPreemption) return;
++  if (poll_before) poll(false);
++  ZLocker<ZConditionLock> locker(_lock);
++  _phase = name;
++  log_debug(gc, preempt)("Old cycle=%u phase=%s", _cycle, _phase);
++}
++void ZOldPreemption::poll(bool in_sts) {
++  if (!_joined || (!requested() && ZOldPreemptionStressDelay == 0)) return;
++  // Publish both generations' stacks. Preserve the bitmap and C++ task frame.
++  if (in_sts) ZHeap::heap()->mark_flush(Thread::current());
++  SuspendibleThreadSetLeaver sts_leaver(in_sts);
++  ZLocker<ZConditionLock> locker(_lock);
++  if (!_requested && ZOldPreemptionStressDelay != 0 && Thread::current()->is_Worker_thread()) {
++    _lock->wait(ZOldPreemptionStressDelay);
++  }
++  if (!_requested) return;
++  _running--;
++  log_trace(gc, preempt)("Old cycle=%u phase=%s parked thread=" PTR_FORMAT " at=%.6f",
++                        _cycle, _phase, p2i(Thread::current()), os::elapsedTime());
++  if (_running == 0) _lock->notify_all();
++  while (_requested) _lock->wait();
++  const bool first_running = _running == 0;
++  _running++;
++  if (first_running) start_run_window_locked("coordinator-resume");
++  log_trace(gc, preempt)("Old cycle=%u phase=%s resumed thread=" PTR_FORMAT " at=%.6f",
++                        _cycle, _phase, p2i(Thread::current()), os::elapsedTime());
++}
++void ZOldPreemption::mark_progress(size_t entries) {
++  if (_joined) Atomic::add(&_mark_entries, uint64_t(entries), memory_order_relaxed);
++}
++void ZOldPreemption::relocate_progress() {
++  if (ZOldGCPreemption) Atomic::add(&_relocated_pages, uint64_t(1), memory_order_relaxed);
++}
++void ZOldPreemption::relocation_resumed() {
++  if (!ZOldGCPreemption || !Atomic::load(&_run_window_pending)) return;
++  ZLocker<ZConditionLock> locker(_lock);
++  start_run_window_locked("relocation-resume");
++}
++void ZOldPreemption::request() {
++  if (!ZOldGCPreemption) return;
++  {
++    ZLocker<ZConditionLock> locker(_lock);
++    const uintx min_run_millis = ZOldPreemptionMinRunMillis;
++    while (_active && min_run_millis != 0) {
++      if (Atomic::load(&_run_window_pending)) {
++        log_trace(gc, preempt)("Old cycle=%u phase=%s preemption waits for Old to resume", _cycle, _phase);
++        _lock->wait();
++        continue;
++      }
++
++      const double remaining = _preemption_allowed_at - os::elapsedTime();
++      if (remaining <= 0) break;
++
++      const uint64_t wait_millis = MAX2<uint64_t>(1, (uint64_t)(remaining * 1000.0));
++      log_trace(gc, preempt)("Old cycle=%u phase=%s preemption delayed %.3fms by min-run=%zums",
++                             _cycle, _phase, remaining * 1000.0, (size_t)min_run_millis);
++      _lock->wait(wait_millis);
++    }
++    assert(!_requested, "Only the Minor driver requests preemption");
++    Atomic::store(&_requested, true);
++    _request++;
++    _requested_at = os::elapsedTime();
++    log_debug(gc, preempt)("request=" UINT64_FORMAT " Old cycle=%u phase=%s requested at=%.6f running=%u",
++                          _request, _cycle, _phase, _requested_at, _running);
++    _lock->notify_all();
++    while (_running != 0) _lock->wait();
++  }
++  // Outside the coordinator lock. In-flight pages must finish; queued
++  // retainers must still be serviced to avoid blocking a safepoint or Young.
++  ZGeneration::old()->synchronize_relocation();
++  {
++    ZLocker<ZConditionLock> locker(_lock);
++    _parked_at = os::elapsedTime();
++    _pauses++;
++    log_debug(gc, preempt)("request=" UINT64_FORMAT " Old cycle=%u phase=%s all-parked at=%.6f wait=%.3fms epoch=%u mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
++                          _request, _cycle, _phase, _parked_at, (_parked_at - _requested_at) * 1000,
++                          ZGeneration::old()->seqnum(), Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
++  }
++}
++void ZOldPreemption::resume() {
++  if (!ZOldGCPreemption) return;
++  {
++    // Publish the pending run window before releasing either cooperative or
++    // relocation workers. Otherwise a relocation worker can wake up and miss
++    // the acknowledgement, leaving the next Minor waiting until Relocate ends.
++    ZLocker<ZConditionLock> locker(_lock);
++    const double duration = os::elapsedTime() - _parked_at;
++    _paused_seconds += duration;
++    log_debug(gc, preempt)("request=" UINT64_FORMAT " Old cycle=%u phase=%s resume pause=%.3fms epoch=%u mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
++                          _request, _cycle, _phase, duration * 1000, ZGeneration::old()->seqnum(),
++                          Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
++    Atomic::store(&_run_window_pending, _active);
++    _preemption_allowed_at = 0;
++    Atomic::store(&_requested, false);
++    _lock->notify_all();
++  }
++
++  // Relocation has a separate pseudo-STS. Its first background worker that
++  // really leaves synchronization acknowledges the run window.
++  ZGeneration::old()->desynchronize_relocation();
++}
++void ZOldPreemption::minor_start() {
++  if (ZOldGCPreemption) log_debug(gc, preempt)("request=" UINT64_FORMAT " Minor start", _request);
++}
++void ZOldPreemption::minor_end() {
++  if (ZOldGCPreemption) log_debug(gc, preempt)("request=" UINT64_FORMAT " Minor end", _request);
++}
+diff --git a/src/hotspot/share/gc/z/zOldPreemption.hpp b/src/hotspot/share/gc/z/zOldPreemption.hpp
+new file mode 100644
+index 0000000..3a81fcf
+--- /dev/null
++++ b/src/hotspot/share/gc/z/zOldPreemption.hpp
+@@ -0,0 +1,91 @@
++/*
++ * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++#ifndef SHARE_GC_Z_ZOLDPREEMPTION_HPP
++#define SHARE_GC_Z_ZOLDPREEMPTION_HPP
++#include "gc/z/zLock.hpp"
++#include "memory/allocation.hpp"
++#include "utilities/globalDefinitions.hpp"
++
++// Old-local participation, independent of STS. Only audited tasks participate.
++class ZOldPreemption : public AllStatic {
++  static ZConditionLock* _lock;
++  static volatile bool _requested;
++  static THREAD_LOCAL bool _joined;
++  static uint _running;
++  static bool _active;
++  static uint _cycle;
++  static uint64_t _request;
++  static uint64_t _pauses;
++  static volatile uint64_t _mark_entries;
++  static volatile uint64_t _relocated_pages;
++  static const char* _phase;
++  static double _requested_at;
++  static double _parked_at;
++  static double _paused_seconds;
++  static volatile bool _run_window_pending;
++  static double _preemption_allowed_at;
++  static void start_run_window_locked(const char* source);
++public:
++  static void initialize();
++  static bool joined();
++  static bool requested();
++  static void join();
++  static void leave();
++  static void start();
++  static void end();
++  static void phase(const char* name, bool poll = true);
++  static void poll(bool in_sts);
++  static void mark_progress(size_t entries);
++  static void relocate_progress();
++  static void relocation_resumed();
++  static void request();
++  static void resume();
++  static void minor_start();
++  static void minor_end();
++};
++class ZOldPreemptionJoiner : public StackObj {
++  bool _active;
++public:
++  ZOldPreemptionJoiner(bool active) : _active(active) { if (_active) ZOldPreemption::join(); }
++  ~ZOldPreemptionJoiner() { if (_active) ZOldPreemption::leave(); }
++};
++// Destroy after releasing any inner lock, before rejoining an outer STS leaver.
++class ZOldPreemptionLeaver : public StackObj {
++  bool _active;
++public:
++  ZOldPreemptionLeaver() : _active(ZOldPreemption::joined()) { if (_active) ZOldPreemption::leave(); }
++  ~ZOldPreemptionLeaver() { if (_active) ZOldPreemption::join(); }
++};
++class ZOldPreemptionCycle : public StackObj {
++public:
++  ZOldPreemptionCycle() { ZOldPreemption::start(); }
++  ~ZOldPreemptionCycle() { ZOldPreemption::end(); }
++};
++// Construct BEFORE DriverLocker, so resume follows driver unlock.
++class ZOldPreemptionRequest : public StackObj {
++public:
++  ZOldPreemptionRequest() { ZOldPreemption::request(); }
++  ~ZOldPreemptionRequest() { ZOldPreemption::resume(); }
++};
++#endif // SHARE_GC_Z_ZOLDPREEMPTION_HPP
+diff --git a/src/hotspot/share/gc/z/zPage.cpp b/src/hotspot/share/gc/z/zPage.cpp
+index 80e10dc..4c698e0 100644
+--- a/src/hotspot/share/gc/z/zPage.cpp
++++ b/src/hotspot/share/gc/z/zPage.cpp
+@@ -27,6 +27,7 @@
+ #include "gc/z/zPage.inline.hpp"
+ #include "gc/z/zPageAge.hpp"
+ #include "gc/z/zRememberedSet.inline.hpp"
++#include "runtime/atomic.hpp"
+ #include "utilities/align.hpp"
+ #include "utilities/debug.hpp"
+ 
+@@ -34,6 +35,7 @@ ZPage::ZPage(ZPageType type, ZPageAge age, const ZVirtualMemory& vmem, ZMultiPar
+   : _type(type),
+     _generation_id(/* set in reset */),
+     _age(/* set in reset */),
++    _young_age(/* set in reset */),
+     _seqnum(/* set in reset */),
+     _seqnum_other(/* set in reset */),
+     _single_partition_id(partition_id),
+@@ -92,7 +94,13 @@ void ZPage::remset_alloc() {
+ }
+ 
+ ZPage* ZPage::reset(ZPageAge age) {
++  const uint32_t young_age = age == ZPageAge::old ? 0u : static_cast<uint32_t>(age);
++  return reset(age, young_age);
++}
++
++ZPage* ZPage::reset(ZPageAge age, uint32_t young_age) {
+   _age = age;
++  Atomic::store(&_young_age, age == ZPageAge::old ? 0u : young_age);
+ 
+   _generation_id = age == ZPageAge::old
+       ? ZGenerationId::old
+@@ -103,6 +111,24 @@ ZPage* ZPage::reset(ZPageAge age) {
+   return this;
+ }
+ 
++void ZPage::set_young_age(uint32_t young_age) {
++  assert(is_young(), "Only young pages have a young age");
++  Atomic::store(&_young_age, young_age);
++}
++
++void ZPage::merge_young_age(uint32_t young_age) {
++  assert(is_young(), "Only young pages have a young age");
++
++  uint32_t current = Atomic::load(&_young_age);
++  while (young_age < current) {
++    const uint32_t observed = Atomic::cmpxchg(&_young_age, current, young_age, memory_order_relaxed);
++    if (observed == current) {
++      return;
++    }
++    current = observed;
++  }
++}
++
+ void ZPage::reset_livemap() {
+   _livemap.reset();
+ }
+diff --git a/src/hotspot/share/gc/z/zPage.hpp b/src/hotspot/share/gc/z/zPage.hpp
+index 96900a3..ba56a04 100644
+--- a/src/hotspot/share/gc/z/zPage.hpp
++++ b/src/hotspot/share/gc/z/zPage.hpp
+@@ -44,6 +44,7 @@ private:
+   const ZPageType               _type;
+   ZGenerationId                 _generation_id;
+   ZPageAge                      _age;
++  volatile uint32_t             _young_age;
+   uint32_t                      _seqnum;
+   uint32_t                      _seqnum_other;
+   const uint32_t                _single_partition_id;
+@@ -102,12 +103,16 @@ public:
+   ZMultiPartitionTracker* multi_partition_tracker() const;
+ 
+   ZPageAge age() const;
++  uint32_t young_age() const;
++  void set_young_age(uint32_t young_age);
++  void merge_young_age(uint32_t young_age);
+ 
+   uint32_t seqnum() const;
+   bool is_allocating() const;
+   bool is_relocatable() const;
+ 
+   ZPage* reset(ZPageAge age);
++  ZPage* reset(ZPageAge age, uint32_t young_age);
+   void reset_livemap();
+   void reset_top_for_allocation();
+ 
+diff --git a/src/hotspot/share/gc/z/zPage.inline.hpp b/src/hotspot/share/gc/z/zPage.inline.hpp
+index f6c2029..cde885e 100644
+--- a/src/hotspot/share/gc/z/zPage.inline.hpp
++++ b/src/hotspot/share/gc/z/zPage.inline.hpp
+@@ -172,6 +172,10 @@ inline ZPageAge ZPage::age() const {
+   return _age;
+ }
+ 
++inline uint32_t ZPage::young_age() const {
++  return Atomic::load(&_young_age);
++}
++
+ inline uint32_t ZPage::seqnum() const {
+   return _seqnum;
+ }
+diff --git a/src/hotspot/share/gc/z/zReferenceProcessor.cpp b/src/hotspot/share/gc/z/zReferenceProcessor.cpp
+index 1af4dea..1ea2ee3 100644
+--- a/src/hotspot/share/gc/z/zReferenceProcessor.cpp
++++ b/src/hotspot/share/gc/z/zReferenceProcessor.cpp
+@@ -31,6 +31,7 @@
+ #include "gc/z/zReferenceProcessor.hpp"
+ #include "gc/z/zStat.hpp"
+ #include "gc/z/zTask.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zTracer.inline.hpp"
+ #include "gc/z/zValue.inline.hpp"
+ #include "memory/universe.hpp"
+@@ -309,6 +310,7 @@ void ZReferenceProcessor::process_worker_discovered_list(zaddress discovered_lis
+     }
+ 
+     reference = next;
++    ZOldPreemption::poll(true);
+     SuspendibleThreadSet::yield();
+   }
+ 
+@@ -432,7 +434,7 @@ private:
+ 
+ public:
+   ZReferenceProcessorTask(ZReferenceProcessor* reference_processor)
+-    : ZTask("ZReferenceProcessorTask"),
++    : ZTask("ZReferenceProcessorTask", ZOldTaskMode::cooperative),
+       _reference_processor(reference_processor) {}
+ 
+   virtual void work() {
+@@ -476,6 +478,7 @@ void ZReferenceProcessor::verify_pending_references() {
+       assert(ZPointer::is_marked_any_old(ZBarrier::load_atomic(referent_addr)), "invariant");
+     }
+ 
++    ZOldPreemption::poll(true);
+     SuspendibleThreadSet::yield();
+   }
+ #endif
+diff --git a/src/hotspot/share/gc/z/zRelocate.cpp b/src/hotspot/share/gc/z/zRelocate.cpp
+index df2dd8a..27a21a3 100644
+--- a/src/hotspot/share/gc/z/zRelocate.cpp
++++ b/src/hotspot/share/gc/z/zRelocate.cpp
+@@ -36,6 +36,7 @@
+ #include "gc/z/zPage.inline.hpp"
+ #include "gc/z/zPageAge.hpp"
+ #include "gc/z/zRelocate.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zRelocationSet.inline.hpp"
+ #include "gc/z/zRootsIterator.hpp"
+ #include "gc/z/zStackWatermark.hpp"
+@@ -52,12 +53,13 @@
+ static const ZStatCriticalPhase ZCriticalPhaseRelocationStall("Relocation Stall");
+ static const ZStatSubPhase ZSubPhaseConcurrentRelocateRememberedSetFlipPromotedYoung("Concurrent Relocate Remset FP", ZGenerationId::young);
+ 
+-ZRelocateQueue::ZRelocateQueue()
++ZRelocateQueue::ZRelocateQueue(bool is_old)
+   : _lock(),
+     _queue(),
+     _nworkers(0),
+     _nsynchronized(0),
+-    _synchronize(false),
++    _synchronize(0),
++    _is_old(is_old),
+     _is_active(false),
+     _needs_attention(0) {}
+ 
+@@ -116,7 +118,7 @@ void ZRelocateQueue::leave() {
+ 
+   assert(_nsynchronized <= _nworkers, "_nsynchronized: %u _nworkers: %u", _nsynchronized, _nworkers);
+ 
+-  log_debug(gc, reloc)("Leaving workers: left: %u _synchronize: %d _nsynchronized: %u", _nworkers, _synchronize, _nsynchronized);
++  log_debug(gc, reloc)("Leaving workers: left: %u _synchronize: %u _nsynchronized: %u", _nworkers, _synchronize, _nsynchronized);
+ 
+   // Prune done forwardings
+   const bool forwardings_done = prune();
+@@ -206,6 +208,9 @@ public:
+ 
+ void ZRelocateQueue::synchronize_thread() {
+   _nsynchronized++;
++  if (_is_old && ZOldPreemption::requested()) {
++    log_trace(gc, preempt)("Old relocation parked worker=%u", WorkerThread::worker_id());
++  }
+ 
+   log_debug(gc, reloc)("Synchronize worker _nsynchronized %u", _nsynchronized);
+ 
+@@ -218,6 +223,9 @@ void ZRelocateQueue::synchronize_thread() {
+ 
+ void ZRelocateQueue::desynchronize_thread() {
+   _nsynchronized--;
++  if (_is_old && ZOldPreemption::requested()) {
++    log_trace(gc, preempt)("Old relocation leaving park worker=%u (queued retainer)", WorkerThread::worker_id());
++  }
+ 
+   log_debug(gc, reloc)("Desynchronize worker _nsynchronized %u", _nsynchronized);
+ 
+@@ -225,6 +233,10 @@ void ZRelocateQueue::desynchronize_thread() {
+ }
+ 
+ ZForwarding* ZRelocateQueue::synchronize_poll() {
++  if (_is_old && ZOldPreemptionStressDelay != 0) {
++    ZLocker<ZConditionLock> locker(&_lock);
++    if (_synchronize == 0) _lock.wait(ZOldPreemptionStressDelay);
++  }
+   // Fast path avoids locking
+   if (!needs_attention()) {
+     return nullptr;
+@@ -279,9 +291,8 @@ void ZRelocateQueue::clear() {
+ 
+ void ZRelocateQueue::synchronize() {
+   ZLocker<ZConditionLock> locker(&_lock);
+-  _synchronize = true;
+-
+-  inc_needs_attention();
++  if (_synchronize++ == 0) inc_needs_attention();
++  _lock.notify_all();
+ 
+   log_debug(gc, reloc)("Synchronize all workers 1 _nworkers: %u _nsynchronized: %u", _nworkers, _nsynchronized);
+ 
+@@ -293,7 +304,8 @@ void ZRelocateQueue::synchronize() {
+ 
+ void ZRelocateQueue::desynchronize() {
+   ZLocker<ZConditionLock> locker(&_lock);
+-  _synchronize = false;
++  assert(_synchronize > 0, "Unbalanced relocation hold");
++  if (--_synchronize != 0) return;
+ 
+   log_debug(gc, reloc)("Desynchronize all workers _nworkers: %u _nsynchronized: %u", _nworkers, _nsynchronized);
+ 
+@@ -306,7 +318,7 @@ void ZRelocateQueue::desynchronize() {
+ 
+ ZRelocate::ZRelocate(ZGeneration* generation)
+   : _generation(generation),
+-    _queue() {}
++    _queue(generation->is_old()) {}
+ 
+ ZWorkers* ZRelocate::workers() const {
+   return _generation->workers();
+@@ -385,7 +397,7 @@ zaddress ZRelocate::forward_object(ZForwarding* forwarding, zaddress_unsafe from
+   return to_addr;
+ }
+ 
+-static ZPage* alloc_page(ZAllocatorForRelocation* allocator, ZPageType type, size_t size) {
++static ZPage* alloc_page(ZAllocatorForRelocation* allocator, ZPageType type, size_t size, uint32_t young_age) {
+   if (ZStressRelocateInPlace) {
+     // Simulate failure to allocate a new page. This will
+     // cause the page being relocated to be relocated in-place.
+@@ -396,7 +408,12 @@ static ZPage* alloc_page(ZAllocatorForRelocation* allocator, ZPageType type, siz
+   flags.set_non_blocking();
+   flags.set_gc_relocation();
+ 
+-  return allocator->alloc_page_for_relocation(type, size, flags);
++  ZPage* const page = allocator->alloc_page_for_relocation(type, size, flags);
++  if (page != nullptr && page->is_young()) {
++    page->set_young_age(young_age);
++  }
++
++  return page;
+ }
+ 
+ static void retire_target_page(ZGeneration* generation, ZPage* page) {
+@@ -427,7 +444,7 @@ public:
+ 
+   ZPage* alloc_and_retire_target_page(ZForwarding* forwarding, ZPage* target) {
+     ZAllocatorForRelocation* const allocator = ZAllocator::relocation(forwarding->to_age());
+-    ZPage* const page = alloc_page(allocator, forwarding->type(), forwarding->size());
++    ZPage* const page = alloc_page(allocator, forwarding->type(), forwarding->size(), forwarding->to_young_age());
+     if (page == nullptr) {
+       Atomic::inc(&_in_place_count);
+     }
+@@ -510,7 +527,7 @@ public:
+     const ZPageAge to_age = forwarding->to_age();
+     if (shared(to_age) == target) {
+       ZAllocatorForRelocation* const allocator = ZAllocator::relocation(forwarding->to_age());
+-      ZPage* const to_page = alloc_page(allocator, forwarding->type(), forwarding->size());
++      ZPage* const to_page = alloc_page(allocator, forwarding->type(), forwarding->size(), forwarding->to_young_age());
+       set_shared(to_age, to_page);
+       if (to_page == nullptr) {
+         Atomic::inc(&_in_place_count);
+@@ -855,7 +872,7 @@ private:
+     // Promotions happen through a new cloned page
+     ZPage* const to_page = promotion
+         ? from_page->clone_for_promotion()
+-        : from_page->reset(to_age);
++        : from_page->reset(to_age, _forwarding->to_young_age());
+ 
+     // Reset page for in-place relocation
+     to_page->reset_top_for_allocation();
+@@ -893,6 +910,9 @@ private:
+       // in-place.
+       const ZPageAge to_age = _forwarding->to_age();
+       ZPage* to_page = _allocator->alloc_and_retire_target_page(_forwarding, target(to_age));
++      if (to_page != nullptr && to_page->is_young()) {
++        to_page->merge_young_age(_forwarding->to_young_age());
++      }
+       set_target(to_age, to_page);
+       if (to_page != nullptr) {
+         continue;
+@@ -971,6 +991,11 @@ public:
+   void do_forwarding(ZForwarding* forwarding) {
+     _forwarding = forwarding;
+ 
++    ZPage* const to_page = target(_forwarding->to_age());
++    if (to_page != nullptr && to_page->is_young()) {
++      to_page->merge_young_age(_forwarding->to_young_age());
++    }
++
+     _forwarding->page()->log_msg(" (relocate page)");
+ 
+     ZVerify::before_relocation(_forwarding);
+@@ -1064,7 +1089,7 @@ private:
+ 
+ public:
+   ZRelocateTask(ZRelocationSet* relocation_set, ZRelocateQueue* queue)
+-    : ZRestartableTask("ZRelocateTask"),
++    : ZRestartableTask("ZRelocateTask", ZOldTaskMode::relocation),
+       _iter(relocation_set),
+       _generation(relocation_set->generation()),
+       _queue(queue),
+@@ -1098,6 +1123,7 @@ public:
+       // After the mark_done call a safepointing could be completed and a
+       // new GC phase could be entered.
+       forwarding->mark_done();
++      if (_generation->is_old()) ZOldPreemption::relocate_progress();
+     };
+ 
+     const auto claim_and_do_forwarding = [&](ZForwarding* forwarding) {
+@@ -1127,6 +1153,11 @@ public:
+         do_forwarding(forwarding);
+       }
+ 
++      // This is the actual transition back to background relocation work.
++      // relocation_resumed() has an atomic fast path and only takes the
++      // coordinator lock when a post-Minor run window is pending.
++      if (_generation->is_old()) ZOldPreemption::relocation_resumed();
++
+       if (!do_forwarding_one_from_iter()) {
+         // No more work
+         break;
+@@ -1227,17 +1258,54 @@ void ZRelocate::relocate(ZRelocationSet* relocation_set) {
+   }
+ }
+ 
+-ZPageAge ZRelocate::compute_to_age(ZPageAge from_age) {
++ZPageAge ZRelocate::compute_to_age(const ZPage* from_page, uint32_t* to_young_age) {
++  const ZPageAge from_age = from_page->age();
+   if (from_age == ZPageAge::old) {
++    if (to_young_age != nullptr) {
++      *to_young_age = 0;
++    }
+     return ZPageAge::old;
+   }
+ 
+-  const uint age = static_cast<uint>(from_age);
+-  if (age >= ZGeneration::young()->tenuring_threshold()) {
++  const uint threshold = ZGeneration::young()->tenuring_threshold();
++  const uint category_age = static_cast<uint>(from_age);
++
++  // Preserve the exact upstream semantics for all original thresholds. The
++  // value 15 is the old-generation sentinel in ZPageAge, so survivor14 moves
++  // directly to old when the threshold is 15.
++  if (threshold <= static_cast<uint>(ZPageAge::old)) {
++    if (category_age >= threshold) {
++      if (to_young_age != nullptr) {
++        *to_young_age = 0;
++      }
++      return ZPageAge::old;
++    }
++
++    const ZPageAge to_age = static_cast<ZPageAge>(category_age + 1);
++    if (to_young_age != nullptr) {
++      *to_young_age = to_age == ZPageAge::old ? 0 : from_page->young_age() + 1;
++    }
++    return to_age;
++  }
++
++  // Extended thresholds keep using survivor14 as the physical ZGC age bucket,
++  // while the page carries the real number of survived young collections.
++  const uint32_t from_young_age = from_page->young_age();
++  if (from_young_age >= threshold - 1u) {
++    if (to_young_age != nullptr) {
++      *to_young_age = 0;
++    }
+     return ZPageAge::old;
+   }
+ 
+-  return static_cast<ZPageAge>(age + 1);
++  const uint32_t next_young_age = from_young_age + 1u;
++  if (to_young_age != nullptr) {
++    *to_young_age = next_young_age;
++  }
++
++  return next_young_age <= static_cast<uint32_t>(ZPageAge::survivor14)
++      ? static_cast<ZPageAge>(next_young_age)
++      : ZPageAge::survivor14;
+ }
+ 
+ class ZFlipAgePagesTask : public ZTask {
+@@ -1255,7 +1323,8 @@ public:
+ 
+     for (ZPage* prev_page; _iter.next(&prev_page);) {
+       const ZPageAge from_age = prev_page->age();
+-      const ZPageAge to_age = ZRelocate::compute_to_age(from_age);
++      uint32_t to_young_age;
++      const ZPageAge to_age = ZRelocate::compute_to_age(prev_page, &to_young_age);
+       assert(from_age != ZPageAge::old, "invalid age for a young collection");
+ 
+       // Figure out if this is proper promotion
+@@ -1277,7 +1346,7 @@ public:
+       // Setup to-space page
+       ZPage* const new_page = promotion
+           ? prev_page->clone_for_promotion()
+-          : prev_page->reset(to_age);
++          : prev_page->reset(to_age, to_young_age);
+ 
+       // Reset page for flip aging
+       new_page->reset_livemap();
+diff --git a/src/hotspot/share/gc/z/zRelocate.hpp b/src/hotspot/share/gc/z/zRelocate.hpp
+index 400fc61..296fa1b 100644
+--- a/src/hotspot/share/gc/z/zRelocate.hpp
++++ b/src/hotspot/share/gc/z/zRelocate.hpp
+@@ -30,6 +30,7 @@
+ 
+ class ZForwarding;
+ class ZGeneration;
++class ZPage;
+ class ZWorkers;
+ 
+ typedef size_t ZForwardingCursor;
+@@ -40,7 +41,8 @@ private:
+   ZArray<ZForwarding*> _queue;
+   uint                 _nworkers;
+   uint                 _nsynchronized;
+-  bool                 _synchronize;
++  uint                 _synchronize; // Nested safepoint / preemption holds
++  const bool           _is_old;
+   volatile bool        _is_active;
+   volatile int         _needs_attention;
+ 
+@@ -52,7 +54,7 @@ private:
+   ZForwarding* prune_and_claim();
+ 
+ public:
+-  ZRelocateQueue();
++  ZRelocateQueue(bool is_old);
+ 
+   void activate(uint nworkers);
+   void deactivate();
+@@ -91,7 +93,7 @@ public:
+ 
+   static void add_remset(volatile zpointer* p);
+ 
+-  static ZPageAge compute_to_age(ZPageAge from_age);
++  static ZPageAge compute_to_age(const ZPage* from_page, uint32_t* to_young_age = nullptr);
+ 
+   zaddress relocate_object(ZForwarding* forwarding, zaddress_unsafe from_addr);
+   zaddress forward_object(ZForwarding* forwarding, zaddress_unsafe from_addr);
+diff --git a/src/hotspot/share/gc/z/zRelocationSet.cpp b/src/hotspot/share/gc/z/zRelocationSet.cpp
+index 8cc7bce..b0eca91 100644
+--- a/src/hotspot/share/gc/z/zRelocationSet.cpp
++++ b/src/hotspot/share/gc/z/zRelocationSet.cpp
+@@ -32,6 +32,7 @@
+ #include "gc/z/zRelocationSetSelector.inline.hpp"
+ #include "gc/z/zStat.hpp"
+ #include "gc/z/zTask.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zWorkers.hpp"
+ #include "runtime/atomic.hpp"
+ #include "utilities/debug.hpp"
+@@ -74,13 +75,9 @@ private:
+     install(forwarding, index);
+   }
+ 
+-  ZPageAge to_age(ZPage* page) {
+-    return ZRelocate::compute_to_age(page->age());
+-  }
+-
+ public:
+   ZRelocationSetInstallTask(ZForwardingAllocator* allocator, const ZRelocationSetSelector* selector)
+-    : ZTask("ZRelocationSetInstallTask"),
++    : ZTask("ZRelocationSetInstallTask", ZOldTaskMode::cooperative),
+       _allocator(allocator),
+       _forwardings(nullptr),
+       _nforwardings((size_t)selector->selected_small()->length() + (size_t)selector->selected_medium()->length()),
+@@ -111,18 +108,24 @@ public:
+     // Allocate and install forwardings for small pages
+     for (size_t page_index; _small_iter.next_index(&page_index);) {
+       ZPage* page = _small->at(int(page_index));
+-      ZForwarding* const forwarding = ZForwarding::alloc(_allocator, page, to_age(page));
++      uint32_t to_young_age;
++      const ZPageAge to_age = ZRelocate::compute_to_age(page, &to_young_age);
++      ZForwarding* const forwarding = ZForwarding::alloc(_allocator, page, to_age, to_young_age);
+       install_small(forwarding, (size_t)_medium->length() + page_index);
+ 
++      ZOldPreemption::poll(true);
+       SuspendibleThreadSet::yield();
+     }
+ 
+     // Allocate and install forwardings for medium pages
+     for (size_t page_index; _medium_iter.next_index(&page_index);) {
+       ZPage* page = _medium->at(int(page_index));
+-      ZForwarding* const forwarding = ZForwarding::alloc(_allocator, page, to_age(page));
++      uint32_t to_young_age;
++      const ZPageAge to_age = ZRelocate::compute_to_age(page, &to_young_age);
++      ZForwarding* const forwarding = ZForwarding::alloc(_allocator, page, to_age, to_young_age);
+       install_medium(forwarding, page_index);
+ 
++      ZOldPreemption::poll(true);
+       SuspendibleThreadSet::yield();
+     }
+   }
+@@ -183,6 +186,7 @@ void ZRelocationSet::reset(ZPageAllocator* page_allocator) {
+   ZRelocationSetIterator iter(this);
+   for (ZForwarding* forwarding; iter.next(&forwarding);) {
+     forwarding->~ZForwarding();
++    if (_generation->is_old()) ZOldPreemption::poll(false);
+   }
+ 
+   _nforwardings = 0;
+diff --git a/src/hotspot/share/gc/z/zRelocationSetSelector.cpp b/src/hotspot/share/gc/z/zRelocationSetSelector.cpp
+index e9ef66a..a2aeb50 100644
+--- a/src/hotspot/share/gc/z/zRelocationSetSelector.cpp
++++ b/src/hotspot/share/gc/z/zRelocationSetSelector.cpp
+@@ -24,6 +24,7 @@
+ #include "gc/shared/gc_globals.hpp"
+ #include "gc/z/zArray.inline.hpp"
+ #include "gc/z/zForwarding.inline.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zPage.inline.hpp"
+ #include "gc/z/zRelocationSetSelector.inline.hpp"
+ #include "jfr/jfrEvents.hpp"
+@@ -84,6 +85,7 @@ void ZRelocationSetSelectorGroup::semi_sort() {
+   for (ZPage* page; iter1.next(&page);) {
+     const size_t index = partition_index(page);
+     partitions[index]++;
++    ZOldPreemption::poll(false);
+   }
+ 
+   // Calculate partition fingers
+@@ -105,6 +107,7 @@ void ZRelocationSetSelectorGroup::semi_sort() {
+     const int finger = partitions[index]++;
+     assert(sorted_live_pages.at(finger) == nullptr, "Invalid finger");
+     sorted_live_pages.at_put(finger, page);
++    ZOldPreemption::poll(false);
+   }
+ 
+   _live_pages.swap(&sorted_live_pages);
+@@ -159,6 +162,7 @@ void ZRelocationSetSelectorGroup::select_inner() {
+                          _name, from, to, diff_reclaimable, from_forwarding_entries,
+                          (selected_from == from) ? "Selected" : "Rejected",
+                          int(page_live_bytes * 100 / page->size()));
++    ZOldPreemption::poll(false);
+   }
+ 
+   // Finalize selection
+@@ -167,6 +171,7 @@ void ZRelocationSetSelectorGroup::select_inner() {
+     if (page->is_young()) {
+       _not_selected_pages.append(page);
+     }
++    ZOldPreemption::poll(false);
+   }
+   _live_pages.trunc_to(selected_from);
+   _forwarding_entries = selected_forwarding_entries;
+@@ -196,6 +201,7 @@ void ZRelocationSetSelectorGroup::select() {
+     for (int from = 1; from <= npages; from++) {
+       ZPage* const page = _live_pages.at(from - 1);
+       _not_selected_pages.append(page);
++      ZOldPreemption::poll(false);
+     }
+   }
+ 
+diff --git a/src/hotspot/share/gc/z/zTask.cpp b/src/hotspot/share/gc/z/zTask.cpp
+index 208a20c..d662e74 100644
+--- a/src/hotspot/share/gc/z/zTask.cpp
++++ b/src/hotspot/share/gc/z/zTask.cpp
+@@ -31,8 +31,8 @@ void ZTask::Task::work(uint worker_id) {
+   _task->work();
+ }
+ 
+-ZTask::ZTask(const char* name)
+-  : _worker_task(this, name) {}
++ZTask::ZTask(const char* name, ZOldTaskMode old_mode)
++  : _worker_task(this, name), _old_mode(old_mode) {}
+ 
+ const char* ZTask::name() const {
+   return _worker_task.name();
+@@ -42,7 +42,7 @@ WorkerTask* ZTask::worker_task() {
+   return &_worker_task;
+ }
+ 
+-ZRestartableTask::ZRestartableTask(const char* name)
+-  : ZTask(name) {}
++ZRestartableTask::ZRestartableTask(const char* name, ZOldTaskMode old_mode)
++  : ZTask(name, old_mode) {}
+ 
+ void ZRestartableTask::resize_workers(uint nworkers) {}
+diff --git a/src/hotspot/share/gc/z/zTask.hpp b/src/hotspot/share/gc/z/zTask.hpp
+index 37733f8..5ea9b3d 100644
+--- a/src/hotspot/share/gc/z/zTask.hpp
++++ b/src/hotspot/share/gc/z/zTask.hpp
+@@ -27,6 +27,8 @@
+ #include "gc/shared/workerThread.hpp"
+ #include "memory/allocation.hpp"
+ 
++enum class ZOldTaskMode { serial, cooperative, relocation };
++
+ class ZTask : public StackObj {
+ private:
+   class Task : public WorkerTask {
+@@ -40,9 +42,11 @@ private:
+   };
+ 
+   Task _worker_task;
++  const ZOldTaskMode _old_mode;
+ 
+ public:
+-  ZTask(const char* name);
++  ZTask(const char* name, ZOldTaskMode old_mode = ZOldTaskMode::serial);
++  ZOldTaskMode old_mode() const { return _old_mode; }
+ 
+   const char* name() const;
+   WorkerTask* worker_task();
+@@ -52,7 +56,7 @@ public:
+ 
+ class ZRestartableTask : public ZTask {
+ public:
+-  ZRestartableTask(const char* name);
++  ZRestartableTask(const char* name, ZOldTaskMode old_mode = ZOldTaskMode::serial);
+   virtual void resize_workers(uint nworkers);
+ };
+ 
+diff --git a/src/hotspot/share/gc/z/zUnload.cpp b/src/hotspot/share/gc/z/zUnload.cpp
+index 3dc7ecd..1858e36 100644
+--- a/src/hotspot/share/gc/z/zUnload.cpp
++++ b/src/hotspot/share/gc/z/zUnload.cpp
+@@ -33,15 +33,30 @@
+ #include "gc/z/zGeneration.inline.hpp"
+ #include "gc/z/zLock.inline.hpp"
+ #include "gc/z/zNMethod.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zStat.hpp"
+ #include "gc/z/zUncoloredRoot.inline.hpp"
+ #include "gc/z/zUnload.hpp"
++#include "logging/log.hpp"
+ #include "memory/metaspaceUtils.hpp"
+ #include "oops/access.inline.hpp"
++#include "runtime/os.hpp"
+ 
+ static const ZStatSubPhase ZSubPhaseConcurrentClassesUnlink("Concurrent Classes Unlink", ZGenerationId::old);
+ static const ZStatSubPhase ZSubPhaseConcurrentClassesPurge("Concurrent Classes Purge", ZGenerationId::old);
+ 
++static double elapsed_ms(double start) {
++  return (os::elapsedTime() - start) * 1000.0;
++}
++
++static void old_preemption_poll_in_sts() {
++  ZOldPreemption::poll(true);
++}
++
++static void log_unload_subphase(const char* operation, const char* subphase, double duration_ms) {
++  log_debug(gc, preempt)("Old %s subphase=%s duration=%.3fms", operation, subphase, duration_ms);
++}
++
+ class ZIsUnloadingOopClosure : public OopClosure {
+ private:
+   const uintptr_t _color;
+@@ -140,15 +155,41 @@ void ZUnload::unlink() {
+   ZStatTimerOld timer(ZSubPhaseConcurrentClassesUnlink);
+   SuspendibleThreadSetJoiner sts_joiner;
+   bool unloading_occurred;
++  double active_ms = 0.0;
+ 
++  double start = os::elapsedTime();
+   {
+     MutexLocker ml(ClassLoaderDataGraph_lock);
+     unloading_occurred = SystemDictionary::do_unloading(ZGeneration::old()->gc_timer());
+   }
+-
+-  Klass::clean_weak_klass_links(unloading_occurred);
++  double duration = elapsed_ms(start);
++  active_ms += duration;
++  log_unload_subphase("Class Unlink", "SystemDictionary", duration);
++  ZOldPreemption::poll(true);
++
++  start = os::elapsedTime();
++  Klass::clean_weak_klass_links(unloading_occurred,
++                                true /* clean_alive_klasses */,
++                                old_preemption_poll_in_sts);
++  duration = elapsed_ms(start);
++  active_ms += duration;
++  log_unload_subphase("Class Unlink", "Klass Weak Links", duration);
++  ZOldPreemption::poll(true);
++
++  start = os::elapsedTime();
+   ZNMethod::unlink(_workers, unloading_occurred);
++  duration = elapsed_ms(start);
++  active_ms += duration;
++  log_unload_subphase("Class Unlink", "ZNMethod Unlink", duration);
++  ZOldPreemption::poll(true);
++
++  start = os::elapsedTime();
+   DependencyContext::cleaning_end();
++  duration = elapsed_ms(start);
++  active_ms += duration;
++  log_unload_subphase("Class Unlink", "Dependency Cleaning End", duration);
++  log_debug(gc, preempt)("Old Class Unlink active=%.3fms", active_ms);
++  ZOldPreemption::poll(true);
+ }
+ 
+ void ZUnload::purge() {
+@@ -158,13 +199,23 @@ void ZUnload::purge() {
+ 
+   ZStatTimerOld timer(ZSubPhaseConcurrentClassesPurge);
+ 
++  double start = os::elapsedTime();
+   {
+     SuspendibleThreadSetJoiner sts_joiner;
+     ZNMethod::purge();
+   }
++  log_unload_subphase("Class Purge", "ZNMethod Purge", elapsed_ms(start));
++  ZOldPreemption::poll(false);
+ 
++  start = os::elapsedTime();
+   ClassLoaderDataGraph::purge(/*at_safepoint*/false);
++  log_unload_subphase("Class Purge", "ClassLoaderDataGraph Purge", elapsed_ms(start));
++  ZOldPreemption::poll(false);
++
++  start = os::elapsedTime();
+   CodeCache::purge_exception_caches();
++  log_unload_subphase("Class Purge", "Exception Cache Purge", elapsed_ms(start));
++  ZOldPreemption::poll(false);
+ }
+ 
+ void ZUnload::finish() {
+diff --git a/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp b/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
+index 7373f45..19b1cff 100644
+--- a/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
++++ b/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
+@@ -27,6 +27,7 @@
+ #include "gc/z/zHeap.inline.hpp"
+ #include "gc/z/zRootsIterator.hpp"
+ #include "gc/z/zTask.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zWeakRootsProcessor.hpp"
+ #include "gc/z/zWorkers.hpp"
+ #include "memory/iterator.hpp"
+@@ -37,6 +38,7 @@ class ZPhantomCleanOopClosure : public OopClosure {
+ public:
+   virtual void do_oop(oop* p) {
+     ZBarrier::clean_barrier_on_phantom_oop_field((zpointer*)p);
++    ZOldPreemption::poll(true);
+     SuspendibleThreadSet::yield();
+   }
+ 
+@@ -54,7 +56,7 @@ private:
+ 
+ public:
+   ZProcessWeakRootsTask()
+-    : ZTask("ZProcessWeakRootsTask"),
++    : ZTask("ZProcessWeakRootsTask", ZOldTaskMode::cooperative),
+       _roots_weak_colored(ZGenerationIdOptional::old) {}
+ 
+   ~ZProcessWeakRootsTask() {
+diff --git a/src/hotspot/share/gc/z/zWorkers.cpp b/src/hotspot/share/gc/z/zWorkers.cpp
+index 1e7144a..34074a2 100644
+--- a/src/hotspot/share/gc/z/zWorkers.cpp
++++ b/src/hotspot/share/gc/z/zWorkers.cpp
+@@ -28,6 +28,7 @@
+ #include "gc/z/zStat.hpp"
+ #include "gc/z/zTask.hpp"
+ #include "gc/z/zWorkers.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "runtime/java.hpp"
+ 
+ static const char* workers_name(ZGenerationId id) {
+@@ -45,6 +46,7 @@ static uint max_nworkers(ZGenerationId id) {
+ ZWorkers::ZWorkers(ZGenerationId id, ZStatWorkers* stats)
+   : _workers(workers_name(id),
+              max_nworkers(id)),
++    _id(id),
+     _generation_name(generation_name(id)),
+     _resize_lock(),
+     _requested_nworkers(0),
+@@ -89,6 +91,15 @@ void ZWorkers::set_inactive() {
+   _is_active = false;
+ }
+ 
++class ZOldPreemptibleTask : public WorkerTask {
++  ZTask* const _task;
++public:
++  ZOldPreemptibleTask(ZTask* task) : WorkerTask(task->name()), _task(task) {}
++  void work(uint worker_id) override {
++    ZOldPreemptionJoiner joiner(_task->old_mode() == ZOldTaskMode::cooperative);
++    _task->worker_task()->work(worker_id);
++  }
++};
+ void ZWorkers::run(ZTask* task) {
+   log_debug(gc, task)("Executing %s using %s with %u workers", task->name(), _workers.name(), active_workers());
+ 
+@@ -97,7 +108,14 @@ void ZWorkers::run(ZTask* task) {
+     _stats->at_start(active_workers());
+   }
+ 
+-  _workers.run_task(task->worker_task());
++  if (_id == ZGenerationId::old && ZOldPreemption::joined() && task->old_mode() != ZOldTaskMode::serial) {
++    if (task->old_mode() == ZOldTaskMode::relocation) ZOldPreemption::phase("Relocate", false);
++    ZOldPreemptibleTask wrapper(task);
++    ZOldPreemptionLeaver leaver;
++    _workers.run_task(&wrapper);
++  } else {
++    _workers.run_task(task->worker_task());
++  }
+ 
+   {
+     ZLocker<ZLock> locker(&_resize_lock);
+diff --git a/src/hotspot/share/gc/z/zWorkers.hpp b/src/hotspot/share/gc/z/zWorkers.hpp
+index 8d1f415..7b98acf 100644
+--- a/src/hotspot/share/gc/z/zWorkers.hpp
++++ b/src/hotspot/share/gc/z/zWorkers.hpp
+@@ -38,6 +38,7 @@ class ZTask;
+ class ZWorkers {
+ private:
+   WorkerThreads       _workers;
++  const ZGenerationId _id;
+   const char* const   _generation_name;
+   ZLock               _resize_lock;
+   volatile uint       _requested_nworkers;
+diff --git a/src/hotspot/share/gc/z/z_globals.hpp b/src/hotspot/share/gc/z/z_globals.hpp
+index 4e5d725..0847dcd 100644
+--- a/src/hotspot/share/gc/z/z_globals.hpp
++++ b/src/hotspot/share/gc/z/z_globals.hpp
+@@ -75,6 +75,23 @@
+   product(bool, ZStressRelocateInPlace, false, DIAGNOSTIC,                  \
+           "Always relocate pages in-place")                                 \
+                                                                             \
++  product(bool, ZOldGCPreemption, true, DIAGNOSTIC,                          \
++          "Pause Old work during Minor collections")                        \
++                                                                            \
++  product(uintx, ZOldPreemptionMinRunMillis, 1000, MANAGEABLE,              \
++          "Minimum Old run time after start/resume before another preemption (ms)") \
++          range(0, max_uintx)                                                \
++                                                                            \
++  product(bool, ZOldGCPostMinorSoftMaxMajor, true, MANAGEABLE,             \
++          "Enable post-Minor Major trigger based on SoftMax percentage")   \
++                                                                            \
++  product(uintx, ZOldGCPostMinorSoftMaxPercent, 100, MANAGEABLE,           \
++          "Start a Major after Minor if heap used is at least this percent of SoftMax") \
++          range(0, max_uintx)                                                \
++                                                                            \
++  develop(uintx, ZOldPreemptionStressDelay, 0,                                \
++          "Interruptible delay in milliseconds at Old preemption polls")    \
++                                                                            \
+   product(bool, ZVerifyRoots, trueInDebug, DIAGNOSTIC,                      \
+           "Verify roots")                                                   \
+                                                                             \
+@@ -111,9 +128,9 @@
+           "Always use the minimum medium page size for fast medium page "   \
+           "allocations")                                                    \
+                                                                             \
+-  product(int, ZTenuringThreshold, -1, DIAGNOSTIC,                          \
++  product(int, ZTenuringThreshold, -1, MANAGEABLE,                         \
+           "Young generation tenuring threshold, -1 for dynamic computation")\
+-          range(-1, static_cast<int>(ZPageAgeMax))                          \
++          range(-1, max_jint)                                               \
+                                                                             \
+   develop(bool, ZVerifyOops, false,                                         \
+           "Verify accessed oops")                                           \
+diff --git a/src/hotspot/share/oops/instanceKlass.cpp b/src/hotspot/share/oops/instanceKlass.cpp
+index dd15294..6c74a6f 100644
+--- a/src/hotspot/share/oops/instanceKlass.cpp
++++ b/src/hotspot/share/oops/instanceKlass.cpp
+@@ -2521,9 +2521,12 @@ bool InstanceKlass::is_dependent_nmethod(nmethod* nm) {
+ }
+ #endif //PRODUCT
+ 
+-void InstanceKlass::clean_weak_instanceklass_links() {
++void InstanceKlass::clean_weak_instanceklass_links(Klass::CleanWeakKlassLinksCallback callback) {
+   clean_implementors_list();
+-  clean_method_data();
++  if (callback != nullptr) {
++    callback();
++  }
++  clean_method_data(callback);
+ }
+ 
+ void InstanceKlass::clean_implementors_list() {
+@@ -2552,12 +2555,15 @@ void InstanceKlass::clean_implementors_list() {
+   }
+ }
+ 
+-void InstanceKlass::clean_method_data() {
++void InstanceKlass::clean_method_data(Klass::CleanWeakKlassLinksCallback callback) {
+   for (int m = 0; m < methods()->length(); m++) {
+     MethodData* mdo = methods()->at(m)->method_data();
+     if (mdo != nullptr) {
+       mdo->clean_method_data(/*always_clean*/false);
+     }
++    if (callback != nullptr) {
++      callback();
++    }
+   }
+ }
+ 
+diff --git a/src/hotspot/share/oops/instanceKlass.hpp b/src/hotspot/share/oops/instanceKlass.hpp
+index e253691..9642d4b 100644
+--- a/src/hotspot/share/oops/instanceKlass.hpp
++++ b/src/hotspot/share/oops/instanceKlass.hpp
+@@ -962,10 +962,10 @@ public:
+   void adjust_default_methods(bool* trace_name_printed);
+ #endif // INCLUDE_JVMTI
+ 
+-  void clean_weak_instanceklass_links();
++  void clean_weak_instanceklass_links(Klass::CleanWeakKlassLinksCallback callback = nullptr);
+  private:
+   void clean_implementors_list();
+-  void clean_method_data();
++  void clean_method_data(Klass::CleanWeakKlassLinksCallback callback);
+ 
+  public:
+   // Explicit metaspace deallocation of fields
+diff --git a/src/hotspot/share/oops/klass.cpp b/src/hotspot/share/oops/klass.cpp
+index 66e2938..aa12967 100644
+--- a/src/hotspot/share/oops/klass.cpp
++++ b/src/hotspot/share/oops/klass.cpp
+@@ -719,7 +719,9 @@ void Klass::clean_subklass() {
+   }
+ }
+ 
+-void Klass::clean_weak_klass_links(bool unloading_occurred, bool clean_alive_klasses) {
++void Klass::clean_weak_klass_links(bool unloading_occurred,
++                                   bool clean_alive_klasses,
++                                   CleanWeakKlassLinksCallback callback) {
+   if (!ClassUnloading || !unloading_occurred) {
+     return;
+   }
+@@ -750,14 +752,18 @@ void Klass::clean_weak_klass_links(bool unloading_occurred, bool clean_alive_kla
+     // Clean the implementors list and method data.
+     if (clean_alive_klasses && current->is_instance_klass()) {
+       InstanceKlass* ik = InstanceKlass::cast(current);
+-      ik->clean_weak_instanceklass_links();
++      ik->clean_weak_instanceklass_links(callback);
+ 
+       // JVMTI RedefineClasses creates previous versions that are not in
+       // the class hierarchy, so process them here.
+       while ((ik = ik->previous_versions()) != nullptr) {
+-        ik->clean_weak_instanceklass_links();
++        ik->clean_weak_instanceklass_links(callback);
+       }
+     }
++
++    if (callback != nullptr) {
++      callback();
++    }
+   }
+ }
+ 
+diff --git a/src/hotspot/share/oops/klass.hpp b/src/hotspot/share/oops/klass.hpp
+index f32f9fe..8d23a09 100644
+--- a/src/hotspot/share/oops/klass.hpp
++++ b/src/hotspot/share/oops/klass.hpp
+@@ -736,7 +736,10 @@ public:
+ 
+   void clean_subklass();
+ 
+-  static void clean_weak_klass_links(bool unloading_occurred, bool clean_alive_klasses = true);
++  using CleanWeakKlassLinksCallback = void (*)();
++  static void clean_weak_klass_links(bool unloading_occurred,
++                                     bool clean_alive_klasses = true,
++                                     CleanWeakKlassLinksCallback callback = nullptr);
+   static void clean_subklass_tree() {
+     clean_weak_klass_links(/*unloading_occurred*/ true , /* clean_alive_klasses */ false);
+   }
