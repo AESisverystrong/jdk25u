@@ -1,6 +1,6 @@
 diff --git a/.github/workflows/preemption-windows.yml b/.github/workflows/preemption-windows.yml
 new file mode 100644
-index 0000000..c149741
+index 0000000000000000000000000000000000000000..c149741afbe1e95bda5023415d08bffca968acef
 --- /dev/null
 +++ b/.github/workflows/preemption-windows.yml
 @@ -0,0 +1,55 @@
@@ -61,7 +61,7 @@ index 0000000..c149741
 +          if-no-files-found: ignore
 diff --git a/preemption/LatencyProbe.java b/preemption/LatencyProbe.java
 new file mode 100644
-index 0000000..f658a7b
+index 0000000000000000000000000000000000000000..f658a7b0cd0531c5c5a309d3a8aa925ec26c4c4d
 --- /dev/null
 +++ b/preemption/LatencyProbe.java
 @@ -0,0 +1,51 @@
@@ -118,7 +118,7 @@ index 0000000..f658a7b
 +}
 diff --git a/preemption/README.md b/preemption/README.md
 new file mode 100644
-index 0000000..3c779b1
+index 0000000000000000000000000000000000000000..3c779b17136f1e3a4481eb2e111dd558d83d6f9d
 --- /dev/null
 +++ b/preemption/README.md
 @@ -0,0 +1,103 @@
@@ -227,7 +227,7 @@ index 0000000..3c779b1
 +Final test/build evidence and delivery locations are recorded in `RESULTS.md`.
 diff --git a/preemption/RESULTS.md b/preemption/RESULTS.md
 new file mode 100644
-index 0000000..fe45b32
+index 0000000000000000000000000000000000000000..fe45b325d7d85740b35a6d99db7660a022d83bc8
 --- /dev/null
 +++ b/preemption/RESULTS.md
 @@ -0,0 +1,103 @@
@@ -336,7 +336,7 @@ index 0000000..fe45b32
 +当前暂停长构建是因为用户指出额度已不足，且两次工作目录丢失后没有可复用的构建现场；保留可继续开发的实际代码，不以再次启动数十分钟重编译代替本次交付。
 diff --git a/preemption/WINDOWS.md b/preemption/WINDOWS.md
 new file mode 100644
-index 0000000..801d5b8
+index 0000000000000000000000000000000000000000..801d5b891792353ee087499776c0cfbb9c38bc12
 --- /dev/null
 +++ b/preemption/WINDOWS.md
 @@ -0,0 +1,43 @@
@@ -385,7 +385,7 @@ index 0000000..801d5b8
 +ZGC 启动，最后生成 ZIP、验证 ZIP 完整性并写入 SHA256；不会同时重建和打包镜像。
 diff --git a/preemption/build-linux.sh b/preemption/build-linux.sh
 new file mode 100755
-index 0000000..631c1ae
+index 0000000000000000000000000000000000000000..631c1ae18a2cbcb6f234f76a2489573a41939fbc
 --- /dev/null
 +++ b/preemption/build-linux.sh
 @@ -0,0 +1,17 @@
@@ -408,7 +408,7 @@ index 0000000..631c1ae
 +printf 'JDK image: %s/build/%s/images/jdk\n' "$PWD" "$conf"
 diff --git a/preemption/build-windows.sh b/preemption/build-windows.sh
 new file mode 100755
-index 0000000..a376e37
+index 0000000000000000000000000000000000000000..a376e37d82b075cb0f1a6608fa71ea41fd2da8e1
 --- /dev/null
 +++ b/preemption/build-windows.sh
 @@ -0,0 +1,34 @@
@@ -448,7 +448,7 @@ index 0000000..a376e37
 +printf 'Windows JDK ZIP: %s\n' "$archive"
 diff --git a/preemption/checkpoint.sh b/preemption/checkpoint.sh
 new file mode 100755
-index 0000000..7148ac4
+index 0000000000000000000000000000000000000000..7148ac488e44308a2bf568505005fd6689d60843
 --- /dev/null
 +++ b/preemption/checkpoint.sh
 @@ -0,0 +1,91 @@
@@ -544,7 +544,7 @@ index 0000000..7148ac4
 +if $cache_ok; then cp "$stage/cache-next.snar" "$state/cache.snar.next"; mv "$state/cache.snar.next" "$state/cache.snar"; fi
 +printf '%s\n' "$archive" > "$state/latest-archive"
 diff --git a/src/hotspot/share/classfile/systemDictionary.cpp b/src/hotspot/share/classfile/systemDictionary.cpp
-index ee526e9..37fc7f7 100644
+index ee526e9bb07dc8fa2d0a217eb38b90f6a3d0c43c..37fc7f7e0ff3846d4ae17744d37e9e807960f17b 100644
 --- a/src/hotspot/share/classfile/systemDictionary.cpp
 +++ b/src/hotspot/share/classfile/systemDictionary.cpp
 @@ -75,6 +75,7 @@
@@ -606,7 +606,7 @@ index ee526e9..37fc7f7 100644
  
    return unloading_occurred;
 diff --git a/src/hotspot/share/gc/z/zArguments.cpp b/src/hotspot/share/gc/z/zArguments.cpp
-index 03aa8e5..3f32e18 100644
+index 03aa8e5acee18a439eb385dfc02cce95fc4ae1ea..3f32e1852dcf1f1d8dfaac1f527cfd2cc5d6769d 100644
 --- a/src/hotspot/share/gc/z/zArguments.cpp
 +++ b/src/hotspot/share/gc/z/zArguments.cpp
 @@ -151,7 +151,9 @@ void ZArguments::initialize() {
@@ -633,7 +633,7 @@ index 03aa8e5..3f32e18 100644
    // Enable loop strip mining by default
    if (FLAG_IS_DEFAULT(UseCountedLoopSafepoints)) {
 diff --git a/src/hotspot/share/gc/z/zBarrierSet.cpp b/src/hotspot/share/gc/z/zBarrierSet.cpp
-index 43ea791..98abb7d 100644
+index 43ea791a260ba0f68aae9c0e7a57ec6106e3cc2f..98abb7d4238b92f6958b07ea93d68b1fc5aca514 100644
 --- a/src/hotspot/share/gc/z/zBarrierSet.cpp
 +++ b/src/hotspot/share/gc/z/zBarrierSet.cpp
 @@ -141,7 +141,7 @@ void ZBarrierSet::on_slowpath_allocation_exit(JavaThread* thread, oop new_obj) {
@@ -646,7 +646,7 @@ index 43ea791..98abb7d 100644
    }
  
 diff --git a/src/hotspot/share/gc/z/zBreakpoint.cpp b/src/hotspot/share/gc/z/zBreakpoint.cpp
-index 00e91c2..623b5f9 100644
+index 00e91c2c28aabbeacb7328ea00fa3a54cda2a073..623b5f98fbbf0e47ce3418449d0754edfef391ea 100644
 --- a/src/hotspot/share/gc/z/zBreakpoint.cpp
 +++ b/src/hotspot/share/gc/z/zBreakpoint.cpp
 @@ -23,6 +23,7 @@
@@ -675,7 +675,7 @@ index 00e91c2..623b5f9 100644
    ConcurrentGCBreakpoints::at("AFTER CONCURRENT REFERENCE PROCESSING STARTED");
  }
 diff --git a/src/hotspot/share/gc/z/zDirector.cpp b/src/hotspot/share/gc/z/zDirector.cpp
-index f1256ee..ce07b04 100644
+index f1256eecd19bf80acf8489fedac577363ca7dfc2..6f7cfa2044a518612887ba4bfb29ae024461e0c6 100644
 --- a/src/hotspot/share/gc/z/zDirector.cpp
 +++ b/src/hotspot/share/gc/z/zDirector.cpp
 @@ -73,7 +73,8 @@ struct ZDirectorStats {
@@ -684,7 +684,7 @@ index f1256ee..ce07b04 100644
    : _monitor(),
 -    _stopped(false) {
 +    _stopped(false),
-+    _post_minor_soft_max_exceeded(false) {
++    _post_minor_major_triggered(false) {
    _director = this;
    set_name("ZDirector");
    create_and_start();
@@ -693,16 +693,16 @@ index f1256ee..ce07b04 100644
  }
  
 -static GCCause::Cause make_major_gc_decision(const ZDirectorStats& stats) {
-+static bool rule_major_post_minor_soft_max(bool post_minor_soft_max_exceeded) {
-+  return post_minor_soft_max_exceeded;
++static bool rule_major_post_minor_threshold(bool post_minor_major_triggered) {
++  return post_minor_major_triggered;
 +}
 +
-+static GCCause::Cause make_major_gc_decision(const ZDirectorStats& stats, bool post_minor_soft_max_exceeded) {
++static GCCause::Cause make_major_gc_decision(const ZDirectorStats& stats, bool post_minor_major_triggered) {
    if (ZDriver::major()->is_busy()) {
      return GCCause::_no_gc;
    }
  
-+  if (rule_major_post_minor_soft_max(post_minor_soft_max_exceeded)) {
++  if (rule_major_post_minor_threshold(post_minor_major_triggered)) {
 +    return GCCause::_z_high_usage;
 +  }
 +
@@ -714,10 +714,10 @@ index f1256ee..ce07b04 100644
  }
  
 -static bool start_gc(const ZDirectorStats& stats) {
-+static bool start_gc(const ZDirectorStats& stats, bool post_minor_soft_max_exceeded) {
++static bool start_gc(const ZDirectorStats& stats, bool post_minor_major_triggered) {
    // Try start major collections first as they include a minor collection
 -  const GCCause::Cause major_cause = make_major_gc_decision(stats);
-+  const GCCause::Cause major_cause = make_major_gc_decision(stats, post_minor_soft_max_exceeded);
++  const GCCause::Cause major_cause = make_major_gc_decision(stats, post_minor_major_triggered);
    if (major_cause != GCCause::_no_gc) {
      start_major_gc(stats, major_cause);
      return true;
@@ -725,17 +725,17 @@ index f1256ee..ce07b04 100644
    _director->_monitor.notify();
  }
  
-+void ZDirector::minor_completed(bool soft_max_exceeded) {
++void ZDirector::minor_completed(bool major_triggered) {
 +  ZLocker<ZConditionLock> locker(&_director->_monitor);
-+  _director->_post_minor_soft_max_exceeded |= soft_max_exceeded;
++  _director->_post_minor_major_triggered |= major_triggered;
 +  _director->_monitor.notify();
 +}
 +
-+bool ZDirector::consume_post_minor_soft_max_exceeded() {
++bool ZDirector::consume_post_minor_major_triggered() {
 +  ZLocker<ZConditionLock> locker(&_monitor);
-+  const bool exceeded = _post_minor_soft_max_exceeded;
-+  _post_minor_soft_max_exceeded = false;
-+  return exceeded;
++  const bool triggered = _post_minor_major_triggered;
++  _post_minor_major_triggered = false;
++  return triggered;
 +}
 +
  bool ZDirector::wait_for_tick() {
@@ -745,25 +745,25 @@ index f1256ee..ce07b04 100644
  void ZDirector::run_thread() {
    // Main loop
    while (wait_for_tick()) {
-+    const bool post_minor_soft_max_exceeded = consume_post_minor_soft_max_exceeded();
++    const bool post_minor_major_triggered = consume_post_minor_major_triggered();
      ZDirectorStats stats = sample_stats();
 -    if (!start_gc(stats)) {
-+    if (!start_gc(stats, post_minor_soft_max_exceeded)) {
++    if (!start_gc(stats, post_minor_major_triggered)) {
        adjust_gc(stats);
      }
    }
 diff --git a/src/hotspot/share/gc/z/zDirector.hpp b/src/hotspot/share/gc/z/zDirector.hpp
-index 624d356..d5bd054 100644
+index 624d356ffe2717692f54e47c01ffc4c3de16061e..830be5ac7da633058fcc89875ac42f32eb62a80b 100644
 --- a/src/hotspot/share/gc/z/zDirector.hpp
 +++ b/src/hotspot/share/gc/z/zDirector.hpp
 @@ -34,8 +34,10 @@ private:
  
    ZConditionLock _monitor;
    bool           _stopped;
-+  bool           _post_minor_soft_max_exceeded;
++  bool           _post_minor_major_triggered;
  
    bool wait_for_tick();
-+  bool consume_post_minor_soft_max_exceeded();
++  bool consume_post_minor_major_triggered();
  
  protected:
    virtual void run_thread();
@@ -771,15 +771,15 @@ index 624d356..d5bd054 100644
    ZDirector();
  
    static void evaluate_rules();
-+  static void minor_completed(bool soft_max_exceeded);
++  static void minor_completed(bool major_triggered);
  };
  
  #endif // SHARE_GC_Z_ZDIRECTOR_HPP
 diff --git a/src/hotspot/share/gc/z/zDriver.cpp b/src/hotspot/share/gc/z/zDriver.cpp
-index e8f7af1..5840599 100644
+index e8f7af179cb4c35bf97c86fceeab63f70c52f9b2..64fcac0adc50c0df13570ede7377a5546d1dd7d7 100644
 --- a/src/hotspot/share/gc/z/zDriver.cpp
 +++ b/src/hotspot/share/gc/z/zDriver.cpp
-@@ -29,6 +29,7 @@
+@@ -29,12 +29,14 @@
  #include "gc/z/zCollectedHeap.hpp"
  #include "gc/z/zDirector.hpp"
  #include "gc/z/zDriver.hpp"
@@ -787,7 +787,14 @@ index e8f7af1..5840599 100644
  #include "gc/z/zGCIdPrinter.hpp"
  #include "gc/z/zGeneration.inline.hpp"
  #include "gc/z/zHeap.inline.hpp"
-@@ -62,6 +63,7 @@ ZDriverMajor* ZDriver::_major;
+ #include "gc/z/zLock.inline.hpp"
+ #include "gc/z/zServiceability.hpp"
+ #include "gc/z/zStat.hpp"
++#include "gc/z/z_globals.hpp"
+ 
+ static const ZStatPhaseCollection ZPhaseCollectionMinor("Minor Collection", true /* minor */);
+ static const ZStatPhaseCollection ZPhaseCollectionMajor("Major Collection", false /* minor */);
+@@ -62,6 +64,7 @@ ZDriverMajor* ZDriver::_major;
  
  void ZDriver::initialize() {
    _lock = new ZLock();
@@ -795,7 +802,7 @@ index e8f7af1..5840599 100644
  }
  
  void ZDriver::lock() {
-@@ -187,7 +189,9 @@ public:
+@@ -187,7 +190,9 @@ public:
  void ZDriverMinor::gc(const ZDriverRequest& request) {
    ZDriverScopeMinor scope(request, &_gc_timer);
    ZGCIdMinor minor_id(gc_id());
@@ -805,7 +812,7 @@ index e8f7af1..5840599 100644
  }
  
  static void handle_alloc_stalling_for_young() {
-@@ -204,6 +208,7 @@ void ZDriverMinor::run_thread() {
+@@ -204,6 +209,7 @@ void ZDriverMinor::run_thread() {
      // Wait for GC request
      const ZDriverRequest request = _port.receive();
  
@@ -813,32 +820,36 @@ index e8f7af1..5840599 100644
      ZDriverLocker locker;
  
      abortpoint();
-@@ -213,6 +218,15 @@ void ZDriverMinor::run_thread() {
+@@ -213,6 +219,19 @@ void ZDriverMinor::run_thread() {
  
      abortpoint();
  
 +    const ZHeap* const heap = ZHeap::heap();
 +    const size_t used_after_minor = heap->used();
 +    const size_t soft_max_capacity = heap->soft_max_capacity();
-+    const bool post_minor_soft_max_exceeded = used_after_minor > soft_max_capacity;
-+    if (post_minor_soft_max_exceeded) {
-+      log_debug(gc, director)("Rule Major: Post-Minor Soft Max, UsedAfterMinor: %zuMB, SoftMax: %zuMB",
-+                              used_after_minor / M, soft_max_capacity / M);
++    const uintx trigger_percent = ZOldGCPostMinorSoftMaxPercent;
++    const double trigger_capacity = (double)soft_max_capacity * ((double)trigger_percent / 100.0);
++    const bool post_minor_major_triggered = ZOldGCPostMinorSoftMaxMajor &&
++                                            (double)used_after_minor >= trigger_capacity;
++    if (post_minor_major_triggered) {
++      log_debug(gc, director)("Rule Major: Post-Minor SoftMax Threshold, UsedAfterMinor: %zuMB, SoftMax: %zuMB, Trigger: %zu%% (%.1fMB)",
++                              used_after_minor / M, soft_max_capacity / M, (size_t)trigger_percent,
++                              trigger_capacity / M);
 +    }
 +
      // Notify GC completed
      _port.ack();
  
-@@ -220,7 +234,7 @@ void ZDriverMinor::run_thread() {
+@@ -220,7 +239,7 @@ void ZDriverMinor::run_thread() {
      handle_alloc_stalls();
  
      // Good point to consider back-to-back GC
 -    ZDirector::evaluate_rules();
-+    ZDirector::minor_completed(post_minor_soft_max_exceeded);
++    ZDirector::minor_completed(post_minor_major_triggered);
    }
  }
  
-@@ -247,6 +261,7 @@ static bool should_clear_all_soft_references(GCCause::Cause cause) {
+@@ -247,6 +266,7 @@ static bool should_clear_all_soft_references(GCCause::Cause cause) {
    case GCCause::_z_timer:
    case GCCause::_z_warmup:
    case GCCause::_z_allocation_rate:
@@ -846,7 +857,7 @@ index e8f7af1..5840599 100644
    case GCCause::_z_proactive:
    case GCCause::_metadata_GC_threshold:
    case GCCause::_codecache_GC_threshold:
-@@ -285,6 +300,7 @@ static bool should_preclean_young(GCCause::Cause cause) {
+@@ -285,6 +305,7 @@ static bool should_preclean_young(GCCause::Cause cause) {
    case GCCause::_z_timer:
    case GCCause::_z_warmup:
    case GCCause::_z_allocation_rate:
@@ -854,7 +865,7 @@ index e8f7af1..5840599 100644
    case GCCause::_z_proactive:
    case GCCause::_metadata_GC_threshold:
    case GCCause::_codecache_GC_threshold:
-@@ -349,6 +365,7 @@ void ZDriverMajor::collect(const ZDriverRequest& request) {
+@@ -349,6 +370,7 @@ void ZDriverMajor::collect(const ZDriverRequest& request) {
    case GCCause::_z_timer:
    case GCCause::_z_warmup:
    case GCCause::_z_allocation_rate:
@@ -863,7 +874,7 @@ index e8f7af1..5840599 100644
    case GCCause::_z_proactive:
    case GCCause::_codecache_GC_threshold:
 diff --git a/src/hotspot/share/gc/z/zForwarding.hpp b/src/hotspot/share/gc/z/zForwarding.hpp
-index c58c479..a4992d0 100644
+index c58c479984f9c97031838019ec68abd5fb9aa75b..a4992d0916edbff1e72dad6c6c91a20dc751ea4f 100644
 --- a/src/hotspot/share/gc/z/zForwarding.hpp
 +++ b/src/hotspot/share/gc/z/zForwarding.hpp
 @@ -61,6 +61,8 @@ private:
@@ -896,7 +907,7 @@ index c58c479..a4992d0 100644
    zoffset_end end() const;
    size_t size() const;
 diff --git a/src/hotspot/share/gc/z/zForwarding.inline.hpp b/src/hotspot/share/gc/z/zForwarding.inline.hpp
-index eb5f4a3..fb9392a 100644
+index eb5f4a36161ede11f234a6ddbdbaebbd8f711ba4..fb9392a16948c1a1a1f4be3dbb55db4eb179f76d 100644
 --- a/src/hotspot/share/gc/z/zForwarding.inline.hpp
 +++ b/src/hotspot/share/gc/z/zForwarding.inline.hpp
 @@ -50,19 +50,21 @@ inline uint32_t ZForwarding::nentries(const ZPage* page) {
@@ -940,7 +951,7 @@ index eb5f4a3..fb9392a 100644
    return _virtual.start();
  }
 diff --git a/src/hotspot/share/gc/z/zGeneration.cpp b/src/hotspot/share/gc/z/zGeneration.cpp
-index 772c5a0..1e23742 100644
+index 772c5a0a98b1d2c248791e7ee138e44e00fd1281..1e23742a729412e665c158d2b26e710c3ddb561f 100644
 --- a/src/hotspot/share/gc/z/zGeneration.cpp
 +++ b/src/hotspot/share/gc/z/zGeneration.cpp
 @@ -35,6 +35,7 @@
@@ -1115,7 +1126,7 @@ index 772c5a0..1e23742 100644
  
    // Clear old markings claim bits.
 diff --git a/src/hotspot/share/gc/z/zMark.cpp b/src/hotspot/share/gc/z/zMark.cpp
-index 9846f12..ffea585 100644
+index 9846f1244eceaaa53a8ebe84a2a95e803ab73778..7d872adafbf830e0e00f019d3f04ab20e4f416d4 100644
 --- a/src/hotspot/share/gc/z/zMark.cpp
 +++ b/src/hotspot/share/gc/z/zMark.cpp
 @@ -38,6 +38,7 @@
@@ -1167,7 +1178,38 @@ index 9846f12..ffea585 100644
      if (try_terminate(&context)) {
        // Terminate
        return true;
-@@ -892,7 +899,7 @@ private:
+@@ -798,7 +805,7 @@ private:
+ 
+ public:
+   ZMarkOldRootsTask(ZMark* mark)
+-    : ZTask("ZMarkOldRootsTask"),
++    : ZTask("ZMarkOldRootsTask", ZOldTaskMode::cooperative),
+       _mark(mark),
+       _roots_colored(ZGenerationIdOptional::old),
+       _roots_uncolored(ZGenerationIdOptional::old),
+@@ -808,17 +815,21 @@ public:
+       _nm_cl() {}
+ 
+   virtual void work() {
++    SuspendibleThreadSetJoiner sts_joiner(ZOldPreemption::joined());
++
+     {
+       ZStatTimerWorker timer(ZSubPhaseConcurrentMarkRootColoredOld);
+       _roots_colored.apply(&_cl_colored,
+                            &_cld_cl);
+     }
++    ZOldPreemption::poll(true);
+ 
+     {
+       ZStatTimerWorker timer(ZSubPhaseConcurrentMarkRootUncoloredOld);
+       _roots_uncolored.apply(&_thread_cl,
+                              &_nm_cl);
+     }
++    ZOldPreemption::poll(true);
+ 
+     // Flush and free worker stacks. Needed here since
+     // the set of workers executing during root scanning
+@@ -892,7 +903,7 @@ private:
  
  public:
    ZMarkTask(ZMark* mark)
@@ -1176,8 +1218,19 @@ index 9846f12..ffea585 100644
        _mark(mark) {
      _mark->prepare_work();
    }
+@@ -932,6 +943,10 @@ void ZMark::mark_young_roots() {
+ void ZMark::mark_old_roots() {
+   SuspendibleThreadSetJoiner sts_joiner;
+   ZMarkOldRootsTask task(this);
++  // Cooperative workers own STS membership while scanning. Do not leave the
++  // Old driver joined in STS while it waits for workers that may park for a
++  // Young collection.
++  SuspendibleThreadSetLeaver sts_leaver(ZOldPreemption::joined());
+   workers()->run(&task);
+ }
+ 
 diff --git a/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp b/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
-index cdd9e7d..a42cc99 100644
+index cdd9e7dce2525216e554e9899f633ae4c000fcbb..a42cc9922543c596e8e64a9f46e8578b8c51fd67 100644
 --- a/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
 +++ b/src/hotspot/share/gc/z/zMarkTerminate.inline.hpp
 @@ -23,6 +23,7 @@
@@ -1197,7 +1250,7 @@ index cdd9e7d..a42cc99 100644
  
    Atomic::store(&_nworking, _nworking - 1);
 diff --git a/src/hotspot/share/gc/z/zNMethod.cpp b/src/hotspot/share/gc/z/zNMethod.cpp
-index bf592c2..90f80d0 100644
+index bf592c20fa296c08a6a91f2dfa5ddfe855985c99..90f80d07c782ca316b59d65f29d3494141404e4b 100644
 --- a/src/hotspot/share/gc/z/zNMethod.cpp
 +++ b/src/hotspot/share/gc/z/zNMethod.cpp
 @@ -38,6 +38,7 @@
@@ -1266,10 +1319,10 @@ index bf592c2..90f80d0 100644
  
 diff --git a/src/hotspot/share/gc/z/zOldPreemption.cpp b/src/hotspot/share/gc/z/zOldPreemption.cpp
 new file mode 100644
-index 0000000..22606f0
+index 0000000000000000000000000000000000000000..63e531cf1c997c4dd6d7237cfd17200699e86f85
 --- /dev/null
 +++ b/src/hotspot/share/gc/z/zOldPreemption.cpp
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,217 @@
 +/*
 + * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
 + * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -1310,6 +1363,7 @@ index 0000000..22606f0
 +volatile bool ZOldPreemption::_requested = false;
 +THREAD_LOCAL bool ZOldPreemption::_joined = false;
 +uint ZOldPreemption::_running = 0;
++bool ZOldPreemption::_active = false;
 +uint ZOldPreemption::_cycle = 0;
 +uint64_t ZOldPreemption::_request = 0;
 +uint64_t ZOldPreemption::_pauses = 0;
@@ -1319,6 +1373,8 @@ index 0000000..22606f0
 +double ZOldPreemption::_requested_at = 0;
 +double ZOldPreemption::_parked_at = 0;
 +double ZOldPreemption::_paused_seconds = 0;
++bool ZOldPreemption::_run_window_pending = false;
++double ZOldPreemption::_preemption_allowed_at = 0;
 +void ZOldPreemption::initialize() { _lock = new ZConditionLock(); }
 +bool ZOldPreemption::joined() { return _joined; }
 +bool ZOldPreemption::requested() { return Atomic::load(&_requested); }
@@ -1327,8 +1383,18 @@ index 0000000..22606f0
 +  assert(!_joined, "Nested Old participation");
 +  ZLocker<ZConditionLock> locker(_lock);
 +  while (_requested) _lock->wait();
++  const bool first_running = _running == 0;
 +  _running++;
 +  _joined = true;
++  if (_active && first_running && _run_window_pending) {
++    const double now = os::elapsedTime();
++    _run_window_pending = false;
++    _preemption_allowed_at = now + (double)ZOldPreemptionMinRunMillis / 1000.0;
++    log_debug(gc, preempt)("Old cycle=%u run-window started at=%.6f min=%zums eligible=%.6f",
++                           _cycle, now, (size_t)ZOldPreemptionMinRunMillis,
++                           _preemption_allowed_at);
++    _lock->notify_all();
++  }
 +}
 +void ZOldPreemption::leave() {
 +  if (!ZOldGCPreemption) return;
@@ -1343,12 +1409,17 @@ index 0000000..22606f0
 +  if (!ZOldGCPreemption) return;
 +  ZLocker<ZConditionLock> locker(_lock);
 +  _cycle = GCId::current();
++  _active = true;
 +  _pauses = 0;
 +  _paused_seconds = 0;
++  _run_window_pending = false;
++  _preemption_allowed_at = os::elapsedTime() + (double)ZOldPreemptionMinRunMillis / 1000.0;
 +  Atomic::store(&_mark_entries, uint64_t(0));
 +  Atomic::store(&_relocated_pages, uint64_t(0));
 +  _phase = "Mark Roots";
-+  log_debug(gc, preempt)("Old cycle=%u started epoch=%u", _cycle, ZGeneration::old()->seqnum());
++  log_debug(gc, preempt)("Old cycle=%u started epoch=%u min-run=%zums eligible=%.6f",
++                         _cycle, ZGeneration::old()->seqnum(), (size_t)ZOldPreemptionMinRunMillis,
++                         _preemption_allowed_at);
 +}
 +void ZOldPreemption::end() {
 +  if (!ZOldGCPreemption) return;
@@ -1358,7 +1429,11 @@ index 0000000..22606f0
 +    log_debug(gc, preempt)("Old cycle=%u %s pauses=" UINT64_FORMAT " paused=%.3fms mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
 +                          _cycle, ZAbort::should_abort() ? "shutdown-aborted" : "completed", _pauses,
 +                          _paused_seconds * 1000, Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
++    _active = false;
 +    _phase = "Idle";
++    _run_window_pending = false;
++    _preemption_allowed_at = 0;
++    _lock->notify_all();
 +  }
 +  leave();
 +}
@@ -1384,7 +1459,17 @@ index 0000000..22606f0
 +                        _cycle, _phase, p2i(Thread::current()), os::elapsedTime());
 +  if (_running == 0) _lock->notify_all();
 +  while (_requested) _lock->wait();
++  const bool first_running = _running == 0;
 +  _running++;
++  if (_active && first_running && _run_window_pending) {
++    const double now = os::elapsedTime();
++    _run_window_pending = false;
++    _preemption_allowed_at = now + (double)ZOldPreemptionMinRunMillis / 1000.0;
++    log_debug(gc, preempt)("Old cycle=%u phase=%s run-window started at=%.6f min=%zums eligible=%.6f",
++                           _cycle, _phase, now, (size_t)ZOldPreemptionMinRunMillis,
++                           _preemption_allowed_at);
++    _lock->notify_all();
++  }
 +  log_trace(gc, preempt)("Old cycle=%u phase=%s resumed thread=" PTR_FORMAT " at=%.6f",
 +                        _cycle, _phase, p2i(Thread::current()), os::elapsedTime());
 +}
@@ -1398,6 +1483,22 @@ index 0000000..22606f0
 +  if (!ZOldGCPreemption) return;
 +  {
 +    ZLocker<ZConditionLock> locker(_lock);
++    const uintx min_run_millis = ZOldPreemptionMinRunMillis;
++    while (_active && min_run_millis != 0) {
++      if (_run_window_pending) {
++        log_trace(gc, preempt)("Old cycle=%u phase=%s preemption waits for Old to resume", _cycle, _phase);
++        _lock->wait();
++        continue;
++      }
++
++      const double remaining = _preemption_allowed_at - os::elapsedTime();
++      if (remaining <= 0) break;
++
++      const uint64_t wait_millis = MAX2<uint64_t>(1, (uint64_t)(remaining * 1000.0));
++      log_trace(gc, preempt)("Old cycle=%u phase=%s preemption delayed %.3fms by min-run=%zums",
++                             _cycle, _phase, remaining * 1000.0, (size_t)min_run_millis);
++      _lock->wait(wait_millis);
++    }
 +    assert(!_requested, "Only the Minor driver requests preemption");
 +    Atomic::store(&_requested, true);
 +    _request++;
@@ -1428,6 +1529,8 @@ index 0000000..22606f0
 +  log_debug(gc, preempt)("request=" UINT64_FORMAT " Old cycle=%u phase=%s resume pause=%.3fms epoch=%u mark_entries=" UINT64_FORMAT " relocated_pages=" UINT64_FORMAT,
 +                        _request, _cycle, _phase, duration * 1000, ZGeneration::old()->seqnum(),
 +                        Atomic::load(&_mark_entries), Atomic::load(&_relocated_pages));
++  _run_window_pending = _active;
++  _preemption_allowed_at = 0;
 +  Atomic::store(&_requested, false);
 +  _lock->notify_all();
 +}
@@ -1439,10 +1542,10 @@ index 0000000..22606f0
 +}
 diff --git a/src/hotspot/share/gc/z/zOldPreemption.hpp b/src/hotspot/share/gc/z/zOldPreemption.hpp
 new file mode 100644
-index 0000000..8fcf5f0
+index 0000000000000000000000000000000000000000..677af28f30a7234f895a7308af7923ee05d54b50
 --- /dev/null
 +++ b/src/hotspot/share/gc/z/zOldPreemption.hpp
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,89 @@
 +/*
 + * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
 + * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -1478,6 +1581,7 @@ index 0000000..8fcf5f0
 +  static volatile bool _requested;
 +  static THREAD_LOCAL bool _joined;
 +  static uint _running;
++  static bool _active;
 +  static uint _cycle;
 +  static uint64_t _request;
 +  static uint64_t _pauses;
@@ -1487,6 +1591,8 @@ index 0000000..8fcf5f0
 +  static double _requested_at;
 +  static double _parked_at;
 +  static double _paused_seconds;
++  static bool _run_window_pending;
++  static double _preemption_allowed_at;
 +public:
 +  static void initialize();
 +  static bool joined();
@@ -1530,7 +1636,7 @@ index 0000000..8fcf5f0
 +};
 +#endif // SHARE_GC_Z_ZOLDPREEMPTION_HPP
 diff --git a/src/hotspot/share/gc/z/zPage.cpp b/src/hotspot/share/gc/z/zPage.cpp
-index 80e10dc..4c698e0 100644
+index 80e10dc75ec641b022bc08f3c7c0a3e8e55ae5d3..4c698e09826d9f1c07f114357c9b046779bd8745 100644
 --- a/src/hotspot/share/gc/z/zPage.cpp
 +++ b/src/hotspot/share/gc/z/zPage.cpp
 @@ -27,6 +27,7 @@
@@ -1589,7 +1695,7 @@ index 80e10dc..4c698e0 100644
    _livemap.reset();
  }
 diff --git a/src/hotspot/share/gc/z/zPage.hpp b/src/hotspot/share/gc/z/zPage.hpp
-index 96900a3..ba56a04 100644
+index 96900a376803d12cc3741d79ee379e8b7851096c..ba56a04f95856a3386899e4c5bcc200c43ab7ad6 100644
 --- a/src/hotspot/share/gc/z/zPage.hpp
 +++ b/src/hotspot/share/gc/z/zPage.hpp
 @@ -44,6 +44,7 @@ private:
@@ -1618,7 +1724,7 @@ index 96900a3..ba56a04 100644
    void reset_top_for_allocation();
  
 diff --git a/src/hotspot/share/gc/z/zPage.inline.hpp b/src/hotspot/share/gc/z/zPage.inline.hpp
-index f6c2029..cde885e 100644
+index f6c2029ac06d49c4059087ca520e521078b0f4ec..cde885ef7d6263dce4840f235d070c5cbcf82313 100644
 --- a/src/hotspot/share/gc/z/zPage.inline.hpp
 +++ b/src/hotspot/share/gc/z/zPage.inline.hpp
 @@ -172,6 +172,10 @@ inline ZPageAge ZPage::age() const {
@@ -1633,7 +1739,7 @@ index f6c2029..cde885e 100644
    return _seqnum;
  }
 diff --git a/src/hotspot/share/gc/z/zReferenceProcessor.cpp b/src/hotspot/share/gc/z/zReferenceProcessor.cpp
-index 1af4dea..1ea2ee3 100644
+index 1af4deaec03395908c18ac3137b535ceac31fc12..1ea2ee311ef5da41982d6c672317f333a9361a44 100644
 --- a/src/hotspot/share/gc/z/zReferenceProcessor.cpp
 +++ b/src/hotspot/share/gc/z/zReferenceProcessor.cpp
 @@ -31,6 +31,7 @@
@@ -1670,7 +1776,7 @@ index 1af4dea..1ea2ee3 100644
    }
  #endif
 diff --git a/src/hotspot/share/gc/z/zRelocate.cpp b/src/hotspot/share/gc/z/zRelocate.cpp
-index df2dd8a..67a252a 100644
+index df2dd8a01cb10762a52cb9af7f38cb1a05b8b6ac..67a252a4925ff8cdd552e5408a58960ffc6d9043 100644
 --- a/src/hotspot/share/gc/z/zRelocate.cpp
 +++ b/src/hotspot/share/gc/z/zRelocate.cpp
 @@ -36,6 +36,7 @@
@@ -1936,7 +2042,7 @@ index df2dd8a..67a252a 100644
        // Reset page for flip aging
        new_page->reset_livemap();
 diff --git a/src/hotspot/share/gc/z/zRelocate.hpp b/src/hotspot/share/gc/z/zRelocate.hpp
-index 400fc61..296fa1b 100644
+index 400fc61b055a092e55facf80a042cc8cc3b32781..296fa1b070b4275944703dcdd479007f9b2cdb13 100644
 --- a/src/hotspot/share/gc/z/zRelocate.hpp
 +++ b/src/hotspot/share/gc/z/zRelocate.hpp
 @@ -30,6 +30,7 @@
@@ -1976,7 +2082,7 @@ index 400fc61..296fa1b 100644
    zaddress relocate_object(ZForwarding* forwarding, zaddress_unsafe from_addr);
    zaddress forward_object(ZForwarding* forwarding, zaddress_unsafe from_addr);
 diff --git a/src/hotspot/share/gc/z/zRelocationSet.cpp b/src/hotspot/share/gc/z/zRelocationSet.cpp
-index 8cc7bce..b0eca91 100644
+index 8cc7bceb8e8498b23505cc4112d197fdfe7746ee..b0eca9110a0b227879c67fa7bfff4e3ed0fa00f2 100644
 --- a/src/hotspot/share/gc/z/zRelocationSet.cpp
 +++ b/src/hotspot/share/gc/z/zRelocationSet.cpp
 @@ -32,6 +32,7 @@
@@ -2037,8 +2143,60 @@ index 8cc7bce..b0eca91 100644
    }
  
    _nforwardings = 0;
+diff --git a/src/hotspot/share/gc/z/zRelocationSetSelector.cpp b/src/hotspot/share/gc/z/zRelocationSetSelector.cpp
+index e9ef66a19dc41897a8fb8f11b925da2097b71cf6..a2aeb50a25d5cf5d2250b1122da9f60d38d58a5a 100644
+--- a/src/hotspot/share/gc/z/zRelocationSetSelector.cpp
++++ b/src/hotspot/share/gc/z/zRelocationSetSelector.cpp
+@@ -24,6 +24,7 @@
+ #include "gc/shared/gc_globals.hpp"
+ #include "gc/z/zArray.inline.hpp"
+ #include "gc/z/zForwarding.inline.hpp"
++#include "gc/z/zOldPreemption.hpp"
+ #include "gc/z/zPage.inline.hpp"
+ #include "gc/z/zRelocationSetSelector.inline.hpp"
+ #include "jfr/jfrEvents.hpp"
+@@ -84,6 +85,7 @@ void ZRelocationSetSelectorGroup::semi_sort() {
+   for (ZPage* page; iter1.next(&page);) {
+     const size_t index = partition_index(page);
+     partitions[index]++;
++    ZOldPreemption::poll(false);
+   }
+ 
+   // Calculate partition fingers
+@@ -105,6 +107,7 @@ void ZRelocationSetSelectorGroup::semi_sort() {
+     const int finger = partitions[index]++;
+     assert(sorted_live_pages.at(finger) == nullptr, "Invalid finger");
+     sorted_live_pages.at_put(finger, page);
++    ZOldPreemption::poll(false);
+   }
+ 
+   _live_pages.swap(&sorted_live_pages);
+@@ -159,6 +162,7 @@ void ZRelocationSetSelectorGroup::select_inner() {
+                          _name, from, to, diff_reclaimable, from_forwarding_entries,
+                          (selected_from == from) ? "Selected" : "Rejected",
+                          int(page_live_bytes * 100 / page->size()));
++    ZOldPreemption::poll(false);
+   }
+ 
+   // Finalize selection
+@@ -167,6 +171,7 @@ void ZRelocationSetSelectorGroup::select_inner() {
+     if (page->is_young()) {
+       _not_selected_pages.append(page);
+     }
++    ZOldPreemption::poll(false);
+   }
+   _live_pages.trunc_to(selected_from);
+   _forwarding_entries = selected_forwarding_entries;
+@@ -196,6 +201,7 @@ void ZRelocationSetSelectorGroup::select() {
+     for (int from = 1; from <= npages; from++) {
+       ZPage* const page = _live_pages.at(from - 1);
+       _not_selected_pages.append(page);
++      ZOldPreemption::poll(false);
+     }
+   }
+ 
 diff --git a/src/hotspot/share/gc/z/zTask.cpp b/src/hotspot/share/gc/z/zTask.cpp
-index 208a20c..d662e74 100644
+index 208a20c1914a6e33979b8cc268259f25126e0346..d662e74947a3d45ff2e7f93ef6187bc3025e4652 100644
 --- a/src/hotspot/share/gc/z/zTask.cpp
 +++ b/src/hotspot/share/gc/z/zTask.cpp
 @@ -31,8 +31,8 @@ void ZTask::Task::work(uint worker_id) {
@@ -2063,7 +2221,7 @@ index 208a20c..d662e74 100644
  
  void ZRestartableTask::resize_workers(uint nworkers) {}
 diff --git a/src/hotspot/share/gc/z/zTask.hpp b/src/hotspot/share/gc/z/zTask.hpp
-index 37733f8..5ea9b3d 100644
+index 37733f8873a45ea854fbb801b6863e9654103b5c..5ea9b3da4c9d40c05df345c1c60d6e222ce08bbc 100644
 --- a/src/hotspot/share/gc/z/zTask.hpp
 +++ b/src/hotspot/share/gc/z/zTask.hpp
 @@ -27,6 +27,8 @@
@@ -2098,10 +2256,10 @@ index 37733f8..5ea9b3d 100644
  };
  
 diff --git a/src/hotspot/share/gc/z/zUnload.cpp b/src/hotspot/share/gc/z/zUnload.cpp
-index 3dc7ecd..3653630 100644
+index 3dc7ecd3edc418288f1816a183c247b3ce5b864c..1858e36249921df0e5f2a24734ef4c2904e135d8 100644
 --- a/src/hotspot/share/gc/z/zUnload.cpp
 +++ b/src/hotspot/share/gc/z/zUnload.cpp
-@@ -33,15 +33,26 @@
+@@ -33,15 +33,30 @@
  #include "gc/z/zGeneration.inline.hpp"
  #include "gc/z/zLock.inline.hpp"
  #include "gc/z/zNMethod.hpp"
@@ -2121,6 +2279,10 @@ index 3dc7ecd..3653630 100644
 +  return (os::elapsedTime() - start) * 1000.0;
 +}
 +
++static void old_preemption_poll_in_sts() {
++  ZOldPreemption::poll(true);
++}
++
 +static void log_unload_subphase(const char* operation, const char* subphase, double duration_ms) {
 +  log_debug(gc, preempt)("Old %s subphase=%s duration=%.3fms", operation, subphase, duration_ms);
 +}
@@ -2128,7 +2290,7 @@ index 3dc7ecd..3653630 100644
  class ZIsUnloadingOopClosure : public OopClosure {
  private:
    const uintptr_t _color;
-@@ -140,15 +151,39 @@ void ZUnload::unlink() {
+@@ -140,15 +155,41 @@ void ZUnload::unlink() {
    ZStatTimerOld timer(ZSubPhaseConcurrentClassesUnlink);
    SuspendibleThreadSetJoiner sts_joiner;
    bool unloading_occurred;
@@ -2139,13 +2301,17 @@ index 3dc7ecd..3653630 100644
      MutexLocker ml(ClassLoaderDataGraph_lock);
      unloading_occurred = SystemDictionary::do_unloading(ZGeneration::old()->gc_timer());
    }
+-
+-  Klass::clean_weak_klass_links(unloading_occurred);
 +  double duration = elapsed_ms(start);
 +  active_ms += duration;
 +  log_unload_subphase("Class Unlink", "SystemDictionary", duration);
 +  ZOldPreemption::poll(true);
- 
++
 +  start = os::elapsedTime();
-   Klass::clean_weak_klass_links(unloading_occurred);
++  Klass::clean_weak_klass_links(unloading_occurred,
++                                true /* clean_alive_klasses */,
++                                old_preemption_poll_in_sts);
 +  duration = elapsed_ms(start);
 +  active_ms += duration;
 +  log_unload_subphase("Class Unlink", "Klass Weak Links", duration);
@@ -2168,7 +2334,7 @@ index 3dc7ecd..3653630 100644
  }
  
  void ZUnload::purge() {
-@@ -158,13 +193,20 @@ void ZUnload::purge() {
+@@ -158,13 +199,23 @@ void ZUnload::purge() {
  
    ZStatTimerOld timer(ZSubPhaseConcurrentClassesPurge);
  
@@ -2178,19 +2344,22 @@ index 3dc7ecd..3653630 100644
      ZNMethod::purge();
    }
 +  log_unload_subphase("Class Purge", "ZNMethod Purge", elapsed_ms(start));
++  ZOldPreemption::poll(false);
  
 +  start = os::elapsedTime();
    ClassLoaderDataGraph::purge(/*at_safepoint*/false);
 +  log_unload_subphase("Class Purge", "ClassLoaderDataGraph Purge", elapsed_ms(start));
++  ZOldPreemption::poll(false);
 +
 +  start = os::elapsedTime();
    CodeCache::purge_exception_caches();
 +  log_unload_subphase("Class Purge", "Exception Cache Purge", elapsed_ms(start));
++  ZOldPreemption::poll(false);
  }
  
  void ZUnload::finish() {
 diff --git a/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp b/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
-index 7373f45..19b1cff 100644
+index 7373f451cea3b3555e8d5f625d3f1da7b2bbdbaf..19b1cff43068c23b0ffbd807f7c674ceeb18b9b2 100644
 --- a/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
 +++ b/src/hotspot/share/gc/z/zWeakRootsProcessor.cpp
 @@ -27,6 +27,7 @@
@@ -2219,7 +2388,7 @@ index 7373f45..19b1cff 100644
  
    ~ZProcessWeakRootsTask() {
 diff --git a/src/hotspot/share/gc/z/zWorkers.cpp b/src/hotspot/share/gc/z/zWorkers.cpp
-index 1e7144a..34074a2 100644
+index 1e7144a0c261e8bbd1d30cf4f0be63b5ac57a8f1..34074a26e59f4c98f3cc3f194d1a91f24f3b40b7 100644
 --- a/src/hotspot/share/gc/z/zWorkers.cpp
 +++ b/src/hotspot/share/gc/z/zWorkers.cpp
 @@ -28,6 +28,7 @@
@@ -2271,7 +2440,7 @@ index 1e7144a..34074a2 100644
    {
      ZLocker<ZLock> locker(&_resize_lock);
 diff --git a/src/hotspot/share/gc/z/zWorkers.hpp b/src/hotspot/share/gc/z/zWorkers.hpp
-index 8d1f415..7b98acf 100644
+index 8d1f415256260868f641f26c952666dd7765065b..7b98acfb47965315c2cc2d5d231924c552aeb5cf 100644
 --- a/src/hotspot/share/gc/z/zWorkers.hpp
 +++ b/src/hotspot/share/gc/z/zWorkers.hpp
 @@ -38,6 +38,7 @@ class ZTask;
@@ -2283,15 +2452,26 @@ index 8d1f415..7b98acf 100644
    ZLock               _resize_lock;
    volatile uint       _requested_nworkers;
 diff --git a/src/hotspot/share/gc/z/z_globals.hpp b/src/hotspot/share/gc/z/z_globals.hpp
-index 4e5d725..2d3ad48 100644
+index 4e5d725a5fdec187a24a646384a6bf39f835430a..0847dcdfdabfcf7d06bf572aa4ed8eb9f642630b 100644
 --- a/src/hotspot/share/gc/z/z_globals.hpp
 +++ b/src/hotspot/share/gc/z/z_globals.hpp
-@@ -75,6 +75,12 @@
+@@ -75,6 +75,23 @@
    product(bool, ZStressRelocateInPlace, false, DIAGNOSTIC,                  \
            "Always relocate pages in-place")                                 \
                                                                              \
 +  product(bool, ZOldGCPreemption, true, DIAGNOSTIC,                          \
 +          "Pause Old work during Minor collections")                        \
++                                                                            \
++  product(uintx, ZOldPreemptionMinRunMillis, 1000, MANAGEABLE,              \
++          "Minimum Old run time after start/resume before another preemption (ms)") \
++          range(0, max_uintx)                                                \
++                                                                            \
++  product(bool, ZOldGCPostMinorSoftMaxMajor, true, MANAGEABLE,             \
++          "Enable post-Minor Major trigger based on SoftMax percentage")   \
++                                                                            \
++  product(uintx, ZOldGCPostMinorSoftMaxPercent, 100, MANAGEABLE,           \
++          "Start a Major after Minor if heap used is at least this percent of SoftMax") \
++          range(0, max_uintx)                                                \
 +                                                                            \
 +  develop(uintx, ZOldPreemptionStressDelay, 0,                                \
 +          "Interruptible delay in milliseconds at Old preemption polls")    \
@@ -2299,7 +2479,7 @@ index 4e5d725..2d3ad48 100644
    product(bool, ZVerifyRoots, trueInDebug, DIAGNOSTIC,                      \
            "Verify roots")                                                   \
                                                                              \
-@@ -111,9 +117,9 @@
+@@ -111,9 +128,9 @@
            "Always use the minimum medium page size for fast medium page "   \
            "allocations")                                                    \
                                                                              \
@@ -2311,9 +2491,114 @@ index 4e5d725..2d3ad48 100644
                                                                              \
    develop(bool, ZVerifyOops, false,                                         \
            "Verify accessed oops")                                           \
+diff --git a/src/hotspot/share/oops/instanceKlass.cpp b/src/hotspot/share/oops/instanceKlass.cpp
+index dd15294c3cf4caab46e14b8831dacd2982ef544f..6c74a6f8eadd3c95a60b841ccc8a3b854fb65f4a 100644
+--- a/src/hotspot/share/oops/instanceKlass.cpp
++++ b/src/hotspot/share/oops/instanceKlass.cpp
+@@ -2521,9 +2521,12 @@ bool InstanceKlass::is_dependent_nmethod(nmethod* nm) {
+ }
+ #endif //PRODUCT
+ 
+-void InstanceKlass::clean_weak_instanceklass_links() {
++void InstanceKlass::clean_weak_instanceklass_links(Klass::CleanWeakKlassLinksCallback callback) {
+   clean_implementors_list();
+-  clean_method_data();
++  if (callback != nullptr) {
++    callback();
++  }
++  clean_method_data(callback);
+ }
+ 
+ void InstanceKlass::clean_implementors_list() {
+@@ -2552,12 +2555,15 @@ void InstanceKlass::clean_implementors_list() {
+   }
+ }
+ 
+-void InstanceKlass::clean_method_data() {
++void InstanceKlass::clean_method_data(Klass::CleanWeakKlassLinksCallback callback) {
+   for (int m = 0; m < methods()->length(); m++) {
+     MethodData* mdo = methods()->at(m)->method_data();
+     if (mdo != nullptr) {
+       mdo->clean_method_data(/*always_clean*/false);
+     }
++    if (callback != nullptr) {
++      callback();
++    }
+   }
+ }
+ 
+diff --git a/src/hotspot/share/oops/instanceKlass.hpp b/src/hotspot/share/oops/instanceKlass.hpp
+index e253691b3d470c2b48ee008f6dd947f5593a055e..9642d4bccac68012c9f6deac382f08ffeed8db95 100644
+--- a/src/hotspot/share/oops/instanceKlass.hpp
++++ b/src/hotspot/share/oops/instanceKlass.hpp
+@@ -962,10 +962,10 @@ public:
+   void adjust_default_methods(bool* trace_name_printed);
+ #endif // INCLUDE_JVMTI
+ 
+-  void clean_weak_instanceklass_links();
++  void clean_weak_instanceklass_links(Klass::CleanWeakKlassLinksCallback callback = nullptr);
+  private:
+   void clean_implementors_list();
+-  void clean_method_data();
++  void clean_method_data(Klass::CleanWeakKlassLinksCallback callback);
+ 
+  public:
+   // Explicit metaspace deallocation of fields
+diff --git a/src/hotspot/share/oops/klass.cpp b/src/hotspot/share/oops/klass.cpp
+index 66e29384d86690307b6674d3663547e3a730f1cf..aa129679f628aa9a709de2bcb5c9bea16819829c 100644
+--- a/src/hotspot/share/oops/klass.cpp
++++ b/src/hotspot/share/oops/klass.cpp
+@@ -719,7 +719,9 @@ void Klass::clean_subklass() {
+   }
+ }
+ 
+-void Klass::clean_weak_klass_links(bool unloading_occurred, bool clean_alive_klasses) {
++void Klass::clean_weak_klass_links(bool unloading_occurred,
++                                   bool clean_alive_klasses,
++                                   CleanWeakKlassLinksCallback callback) {
+   if (!ClassUnloading || !unloading_occurred) {
+     return;
+   }
+@@ -750,14 +752,18 @@ void Klass::clean_weak_klass_links(bool unloading_occurred, bool clean_alive_kla
+     // Clean the implementors list and method data.
+     if (clean_alive_klasses && current->is_instance_klass()) {
+       InstanceKlass* ik = InstanceKlass::cast(current);
+-      ik->clean_weak_instanceklass_links();
++      ik->clean_weak_instanceklass_links(callback);
+ 
+       // JVMTI RedefineClasses creates previous versions that are not in
+       // the class hierarchy, so process them here.
+       while ((ik = ik->previous_versions()) != nullptr) {
+-        ik->clean_weak_instanceklass_links();
++        ik->clean_weak_instanceklass_links(callback);
+       }
+     }
++
++    if (callback != nullptr) {
++      callback();
++    }
+   }
+ }
+ 
+diff --git a/src/hotspot/share/oops/klass.hpp b/src/hotspot/share/oops/klass.hpp
+index f32f9fe11854efce5acd38f6a8510ed3f205f079..8d23a09c7685b601c52d021ab1b42a6390a1cc07 100644
+--- a/src/hotspot/share/oops/klass.hpp
++++ b/src/hotspot/share/oops/klass.hpp
+@@ -736,7 +736,10 @@ public:
+ 
+   void clean_subklass();
+ 
+-  static void clean_weak_klass_links(bool unloading_occurred, bool clean_alive_klasses = true);
++  using CleanWeakKlassLinksCallback = void (*)();
++  static void clean_weak_klass_links(bool unloading_occurred,
++                                     bool clean_alive_klasses = true,
++                                     CleanWeakKlassLinksCallback callback = nullptr);
+   static void clean_subklass_tree() {
+     clean_weak_klass_links(/*unloading_occurred*/ true , /* clean_alive_klasses */ false);
+   }
 diff --git a/test/hotspot/jtreg/gc/z/TestOldPreemption.java b/test/hotspot/jtreg/gc/z/TestOldPreemption.java
 new file mode 100644
-index 0000000..8b9dcac
+index 0000000000000000000000000000000000000000..8b9dcac126d53eff77e28f6e97987b87f5462219
 --- /dev/null
 +++ b/test/hotspot/jtreg/gc/z/TestOldPreemption.java
 @@ -0,0 +1,199 @@
